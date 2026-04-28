@@ -1,0 +1,33 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+.venv/
+venv/
+ENV/
+build/
+dist/
+*.egg-info/
+
+# Environments
+.env
+.venv
+env/
+venv/
+ENV/
+
+# OS and Editors
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+
+# Minecraft / Project Specific
+# We ignore the mods folder content because fetch_mods.py/TUI handles downloads.
+# This keeps the repository small and avoids hosting copyrighted mod files.
+# If you WANT to commit mods, comment out the line below.
+mods/*.jar
+
+# Local config overrides or temporary files
+*.log
+tmp/
