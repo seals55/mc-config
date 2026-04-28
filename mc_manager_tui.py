@@ -186,13 +186,12 @@ class SyncManager:
                     if self.status_callback:
                         self.status_callback(display_name, "N/A", "N/A", "[yellow]No compat ver[/yellow]")
 
-            # Update mods.json
-            if set(self.mod_list) != resolved_slugs:
-                self.logger("\nUpdating mods.json with resolved slugs...")
-                self.save_mod_list(repo_root, list(resolved_slugs))
+            # Save mod list ONLY if primary slugs were updated/normalized (not dependencies)
+            # We skip the auto-save of dependencies to keep mods.json clean as per user request.
 
             with open(meta_path, 'w') as f:
                 json.dump(mod_meta, f, indent=4)
+
 
             self.logger("\n[bold]Step 2: Syncing Configurations[/bold]")
             if os.path.exists(local_config):
