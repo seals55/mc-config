@@ -68,7 +68,9 @@ class SyncManager:
         try:
             repo_root = os.path.dirname(os.path.abspath(__file__))
             local_config = os.path.join(repo_root, "config")
+            local_manual = os.path.join(repo_root, "manual_downloads")
             os.makedirs(local_config, exist_ok=True)
+            os.makedirs(local_manual, exist_ok=True)
 
             dst_mods = os.path.join(self.instance.minecraft_path, "mods")
             dst_config = os.path.join(self.instance.minecraft_path, "config")
@@ -89,11 +91,26 @@ class SyncManager:
 
             self.logger("\n[bold]Step 1: Checking Mods & Required Dependencies[/bold]")
             
+            # Sync Manual Downloads first
+            self.logger("\nSyncing manual_downloads folder...")
+            for item in os.listdir(local_manual):
+                if item.endswith(".jar"):
+                    src = os.path.join(local_manual, item)
+                    dst = os.path.join(dst_mods, item)
+                    if not os.path.exists(dst):
+                        shutil.copy2(src, dst)
+                        self.logger(f"  [green]Copied {item} to instance[/green]")
+                        if self.status_callback:
+                            self.status_callback(item, "N/A", "Manual", "[green]Synced (Manual)[/green]")
+                    else:
+                        if self.status_callback:
+                            self.status_callback(item, "Manual", "Manual", "[green]Up to date[/green]")
+
             to_process = list(self.mod_list)
             processed = set()
             updated_count = 0
             installed_count = 0
-            all_resolved_slugs = set(self.mod_list)
+            resolved_slugs = set()
 
             while to_process:
                 slug_or_id = to_process.pop(0)
@@ -101,13 +118,20 @@ class SyncManager:
                     continue
                 processed.add(slug_or_id)
 
-                if self.status_callback:
-                    self.status_callback(slug_or_id, "", "", "[yellow]Checking...[/yellow]")
-
                 project_info = ModrinthAPI.get_project_info(slug_or_id)
-                display_name = project_info.get("title", slug_or_id) if project_info else slug_or_id
-                mod_slug = project_info.get("slug", slug_or_id) if project_info else slug_or_id
-                all_resolved_slugs.add(mod_slug)
+                if not project_info:
+                    # Might be a mod that's only on CF or a broken slug
+                    if self.status_callback:
+                        self.status_callback(slug_or_id, "N/A", "Unknown", "[yellow]Not on Modrinth[/yellow]")
+                    resolved_slugs.add(slug_or_id)
+                    continue
+
+                display_name = project_info.get("title", slug_or_id)
+                mod_slug = project_info.get("slug", slug_or_id)
+                resolved_slugs.add(mod_slug)
+
+                if self.status_callback:
+                    self.status_callback(display_name, "", "", "[yellow]Checking...[/yellow]")
 
                 version_data = ModrinthAPI.get_latest_version(mod_slug, self.instance.mc_version, self.instance.loader)
                 
@@ -159,10 +183,7 @@ class SyncManager:
                             if self.status_callback:
                                 self.status_callback(display_name, latest_ver, latest_ver, "[green]Updated[/green]")
                             updated_count += 1
-                        else:
-                            if self.status_callback:
-                                self.status_callback(display_name, curr_ver_display, latest_ver, "[red]Failed[/red]")
-                
+                    
                     elif not os.path.exists(new_mod_path):
                         self.logger(f"Installing {display_name} -> {filename}...")
                         if self.download_mod(url, new_mod_path):
@@ -170,9 +191,6 @@ class SyncManager:
                             if self.status_callback:
                                 self.status_callback(display_name, latest_ver, latest_ver, "[green]Installed[/green]")
                             installed_count += 1
-                        else:
-                            if self.status_callback:
-                                self.status_callback(display_name, "None", latest_ver, "[red]Failed[/red]")
                     else:
                         self.logger(f"Mod {filename} is up to date.")
                         if self.status_callback:
@@ -183,10 +201,10 @@ class SyncManager:
                     if self.status_callback:
                         self.status_callback(display_name, "N/A", "N/A", "[yellow]No compat ver[/yellow]")
 
-            # Update mods.json
-            if set(self.mod_list) != all_resolved_slugs:
-                self.logger("\nUpdating mods.json with resolved dependencies...")
-                self.save_mod_list(repo_root, list(all_resolved_slugs))
+            # Update mods.json with resolved SLUGS only
+            if set(self.mod_list) != resolved_slugs:
+                self.logger("\nUpdating mods.json with resolved slugs...")
+                self.save_mod_list(repo_root, list(resolved_slugs))
 
             with open(meta_path, 'w') as f:
                 json.dump(mod_meta, f, indent=4)
