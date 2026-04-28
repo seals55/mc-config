@@ -93,23 +93,15 @@ class ModScanner:
         if current == latest: return False
         
         def normalize(v: str) -> str:
-            # 1. Remove everything in brackets: [Fabric/Forge/Neo]
             v = re.sub(r'\[.*?\]', '', v)
-            # 2. Remove anything after a pipe: | What Durability
             v = v.split('|')[0]
-            # 3. Remove common MC version patterns: 1.21.1-
             v = re.sub(r'^[0-9.]+-', '', v.strip())
-            # 4. Remove common suffixes: -fabric, +neo, etc.
             v = re.split(r'[-+ ]', v.strip())[0]
-            # 5. Clean up surrounding noise
             return v.strip().lower()
 
         norm_curr = normalize(current)
         norm_latest = normalize(latest)
         if norm_curr == norm_latest: return False
-        
-        # Very basic check: is it a different string after heavy cleaning?
-        # We could do semantic versioning here, but usually "latest" is what we want.
         return norm_curr != norm_latest
 
 class APIClient:
@@ -137,12 +129,10 @@ class APIClient:
             resp = requests.get(url, timeout=5)
             if resp.status_code == 200:
                 data = resp.json()
-                # Check version-specific list
                 version_files = data.get("versions", {}).get(mc_version, [])
                 for f in version_files:
                     if any(loader.lower() in v.lower() for v in f.get("versions", [])):
                         return {"version": f.get("display", f.get("name", "Unknown")), "url": f"https://www.curseforge.com/minecraft/mc-mods/{slug}", "source": "CurseForge"}
-                # Fallback to main files list
                 for f in data.get("files", []):
                     f_vers = f.get("versions", [])
                     if mc_version in f_vers and any(loader.lower() in v.lower() for v in f_vers):
@@ -154,7 +144,7 @@ class SyncManager:
     def __init__(self, instance: InstanceInfo, logger: Callable[[str], None], status_callback: Optional[Callable[[str, str, str, str, str, str], None]] = None):
         self.instance = instance
         self.logger = logger
-        self.status_callback = status_callback # name, curr, latest, status, source, link
+        self.status_callback = status_callback 
 
     def run(self):
         try:
@@ -162,7 +152,8 @@ class SyncManager:
             local_mods_dir = os.path.join(repo_root, "mods")
             dst_mods = os.path.join(self.instance.minecraft_path, "mods")
             dst_backups = os.path.join(self.instance.minecraft_path, "backups", "mods")
-            os.makedirs(dst_mods, exist_ok=True); os.makedirs(dst_backups, exist_ok=True)
+            os.makedirs(dst_mods, exist_ok=True)
+            os.makedirs(dst_backups, exist_ok=True)
 
             self.logger(f"\n[bold]Scanning local mods...[/bold]")
             local_mods = ModScanner.get_local_mods(local_mods_dir)
@@ -261,7 +252,7 @@ if TUI_AVAILABLE:
             yield Header()
             yield Label("Select a Prism Launcher Instance:", id="title")
             with Container(id="list-container"):
-                yield ListView(*[ListItem(Label(f"{i.name} ({i.mc_v} - {i.loader})"), id=f"inst_{idx}") for idx, i in enumerate(self.instances)])
+                yield ListView(*[ListItem(Label(f"{i.name} ({i.mc_version} - {i.loader})"), id=f"inst_{idx}") for idx, i in enumerate(self.instances)])
             yield Footer()
         def on_list_view_selected(self, event: ListView.Selected):
             idx = int(event.item.id.split("_")[1]); self.app.selected_instance = self.instances[idx]; self.app.push_screen(SyncScreen(self.instances[idx]))
