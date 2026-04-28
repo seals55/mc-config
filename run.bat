@@ -24,9 +24,9 @@ if not exist "%VENV_DIR%" (
     )
 )
 
-:: Launch the TUI application
-echo [System] Launching MC Manager TUI...
-"%VENV_DIR%\Scripts\python.exe" mc_manager_tui.py
+:: Launch the application
+echo [System] Launching MC Manager...
+"%VENV_DIR%\Scripts\python.exe" mc_manager_tui.py %*
 
 if errorlevel 1 (
     echo [System] Application exited with an error.
