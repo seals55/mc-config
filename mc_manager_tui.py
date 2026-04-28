@@ -127,7 +127,18 @@ class SyncScreen(Screen):
     def __init__(self, instance: InstanceInfo):
         super().__init__()
         self.instance = instance
-        self.mod_list = ["infinite-storage-cell"]
+        self.mod_list = self.load_mod_list()
+
+    def load_mod_list(self) -> List[str]:
+        repo_root = os.path.dirname(os.path.abspath(__file__))
+        mods_json = os.path.join(repo_root, "mods.json")
+        if os.path.exists(mods_json):
+            try:
+                with open(mods_json, 'r') as f:
+                    return json.load(f)
+            except Exception:
+                return ["infinite-storage-cell"]
+        return ["infinite-storage-cell"]
 
     def compose(self) -> ComposeResult:
         yield Header()
@@ -164,39 +175,61 @@ class SyncScreen(Screen):
         os.makedirs(dst_mods, exist_ok=True)
         os.makedirs(dst_config, exist_ok=True)
 
-        # 1. Fetch Mods from Modrinth (On-Demand Download)
-        log.write_line("\n[bold]Step 1: Checking/Downloading Mods from Modrinth[/bold]")
-        for slug in self.mod_list:
-            log.write_line(f"Checking {slug}...")
-            version_data = ModrinthAPI.get_latest_version(slug, self.instance.mc_version, self.instance.loader)
+        # 1. Fetch Mods & Dependencies
+        log.write_line("\n[bold]Step 1: Checking Mods & Required Dependencies[/bold]")
+        
+        to_process = set(self.mod_list)
+        processed = set()
+        downloaded_count = 0
+
+        while to_process:
+            slug_or_id = to_process.pop()
+            if slug_or_id in processed:
+                continue
+            processed.add(slug_or_id)
+
+            log.write_line(f"Processing: {slug_or_id}...")
+            version_data = ModrinthAPI.get_latest_version(slug_or_id, self.instance.mc_version, self.instance.loader)
+            
             if version_data:
+                # Add required dependencies to the queue
+                deps = version_data.get('dependencies', [])
+                for dep in deps:
+                    if dep.get('dependency_type') == 'required':
+                        dep_project_id = dep.get('project_id')
+                        if dep_project_id and dep_project_id not in processed:
+                            to_process.add(dep_project_id)
+
                 file_data = next((f for f in version_data['files'] if f['primary']), version_data['files'][0])
                 filename = file_data['filename']
                 url = file_data['url']
                 
-                # Check if the mod already exists in the INSTANCE folder
                 instance_mod_path = os.path.join(dst_mods, filename)
                 
                 if not os.path.exists(instance_mod_path):
-                    log.write_line(f"Downloading {filename} directly to instance...")
+                    log.write_line(f"  -> Downloading {filename}...")
                     try:
                         resp = requests.get(url, stream=True)
                         if resp.status_code == 200:
                             with open(instance_mod_path, 'wb') as f:
                                 for chunk in resp.iter_content(chunk_size=8192):
                                     f.write(chunk)
-                            log.write_line(f"Successfully installed {filename}")
+                            log.write_line(f"  [green]Installed {filename}[/green]")
+                            downloaded_count += 1
                         else:
-                            log.write_line(f"Error downloading {filename}: {resp.status_code}")
+                            log.write_line(f"  [red]Error downloading {filename}: {resp.status_code}[/red]")
                     except Exception as e:
-                        log.write_line(f"Error: {e}")
+                        log.write_line(f"  [red]Error: {e}[/red]")
                 else:
-                    log.write_line(f"Mod {filename} is already installed in this instance.")
+                    log.write_line(f"  Mod {filename} already installed.")
             else:
-                log.write_line(f"No compatible version found for {slug}")
+                log.write_line(f"  [yellow]No compatible version found for {slug_or_id}[/yellow]")
+
+        log.write_line(f"\nTotal new mods installed: {downloaded_count}")
 
         # 2. Sync Configs
         log.write_line("\n[bold]Step 2: Syncing Configurations[/bold]")
+        # ... rest of the sync logic ...
         
         # Copy Configs (Overwrite)
         log.write_line("Updating configurations from local config/ folder...")

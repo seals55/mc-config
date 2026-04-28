@@ -9,29 +9,30 @@
 - **Core Feature:** Automatic detection of Minecraft version and mod loader (Fabric, Forge, NeoForge, Quilt).
 
 ## Directory Structure
-- `config/`: Source directory for configuration files, maintaining the standard `.minecraft/config` structure.
+- `config/`: Source directory for configuration files.
+- `mods.json`: A list of Modrinth slugs for the mods you want to manage.
 - `mc_manager_tui.py`: The primary interactive management tool (TUI).
 - `run.bat`: Windows wrapper script for easy setup and launch.
-- `README.md`: Basic project identification.
-- `GEMINI.md`: Instructional context for AI interactions.
 
 ## Key Files
-- `run.bat`: Automates virtual environment creation and launches the TUI.
-- `mc_manager_tui.py`: An interactive application that scans for Prism Launcher instances, detects their metadata (`mmc-pack.json`), and provides a one-click "Sync & Update" workflow.
+- `mods.json`: Edit this file to add or remove mods. The TUI will automatically handle required dependencies.
+- `mc_manager_tui.py`: Now features recursive dependency resolution from Modrinth.
 
 ## Usage & Development
 
-### Interactive Management
-Simply double-click `run.bat` on Windows. This will:
-1. Create a Python virtual environment (`.venv`) if it doesn't exist.
-2. Install the necessary libraries (`textual`, `requests`).
-3. Launch the `mc_manager_tui.py` application.
+### Adding More Mods
+To add more mods, simply add their Modrinth slugs to the `mods.json` file. For example:
+```json
+[
+    "infinite-storage-cell",
+    "ae2",
+    "sodium"
+]
+```
+The manager will automatically find and download any **required dependency mods** (like `cloth-config` or `indium`) that are needed for your selected mods to run.
 
 ### TUI Behavior
-- **Instance Detection:** Scans `%APPDATA%/PrismLauncher/instances` and parses `instance.cfg` for names and `mmc-pack.json` for technical versions.
-- **On-Demand Mod Fetching:** Automatically searches Modrinth for mods compatible with the detected MC version and loader, downloading them directly to the instance's `mods/` folder if they are missing.
-- **Synchronization:** 
-    - **Configs:** Overwrites instance configurations with local versions from the project's `config/` folder.
+- **Dependency Resolution:** When you sync, the manager checks the latest version of each mod in `mods.json`, identifies all required dependencies, and downloads them directly to the instance if they are missing.
 
 ## AI Interaction Guidelines
 - **Mod List:** To update the list of mods managed by the TUI, modify the `self.mod_list` in the `SyncScreen` class within `mc_manager_tui.py`.

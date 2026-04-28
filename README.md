@@ -50,7 +50,7 @@ python update_instance.py <Instance_Name>
 
 ## Contributing
 
-To add new mods to the automation list, update the `MOD_LIST` in `fetch_mods.py` or the `SyncScreen` class in `mc_manager_tui.py`.
+To add new mods, add their Modrinth slugs to the `mods.json` file. The manager will automatically download all required dependencies.
 
 
 
