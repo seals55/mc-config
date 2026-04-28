@@ -1,0 +1,274 @@
+import os
+import json
+import shutil
+import sys
+import requests
+from typing import Optional, List, Dict
+from dataclasses import dataclass
+
+try:
+    from textual.app import App, ComposeResult
+    from textual.widgets import Header, Footer, Button, Static, Label, ListView, ListItem, Log
+    from textual.containers import Container, Vertical, Horizontal
+    from textual.screen import Screen
+    from textual import work
+except ImportError:
+    print("Error: The 'textual' library is required for the TUI.")
+    print("Please install it with: pip install textual requests")
+    sys.exit(1)
+
+@dataclass
+class InstanceInfo:
+    name: str
+    path: str
+    mc_version: str
+    loader: str # forge, neoforge, fabric, quilt, vanilla
+    minecraft_path: str
+
+class ModrinthAPI:
+    @staticmethod
+    def get_latest_version(slug: str, mc_version: str, loader: str):
+        url = f"https://api.modrinth.com/v2/project/{slug}/version"
+        params = {
+            "loaders": f'["{loader.lower()}"]',
+            "game_versions": f'["{mc_version}"]'
+        }
+        try:
+            response = requests.get(url, params=params, timeout=10)
+            if response.status_code == 200:
+                versions = response.json()
+                return versions[0] if versions else None
+        except Exception:
+            return None
+        return None
+
+class InstanceScanner:
+    def __init__(self, base_path: str):
+        self.base_path = base_path
+
+    def scan(self) -> List[InstanceInfo]:
+        instances = []
+        if not os.path.exists(self.base_path):
+            return []
+
+        for folder in os.listdir(self.base_path):
+            path = os.path.join(self.base_path, folder)
+            if os.path.isdir(path):
+                info = self.parse_instance(path)
+                if info:
+                    instances.append(info)
+        return sorted(instances, key=lambda x: x.name)
+
+    def parse_instance(self, path: str) -> Optional[InstanceInfo]:
+        cfg_path = os.path.join(path, "instance.cfg")
+        pack_path = os.path.join(path, "mmc-pack.json")
+        
+        if not os.path.exists(cfg_path):
+            return None
+
+        # Parse Name
+        name = os.path.basename(path)
+        with open(cfg_path, 'r', encoding='utf-8', errors='ignore') as f:
+            for line in f:
+                if line.startswith("name="):
+                    name = line.split("=", 1)[1].strip()
+                    break
+
+        # Parse Version and Loader
+        mc_version = "Unknown"
+        loader = "vanilla"
+        if os.path.exists(pack_path):
+            try:
+                with open(pack_path, 'r') as f:
+                    data = json.load(f)
+                    components = data.get("components", [])
+                    for comp in components:
+                        uid = comp.get("uid")
+                        version = comp.get("version")
+                        if uid == "net.minecraft":
+                            mc_version = version
+                        elif "fabric-loader" in uid:
+                            loader = "fabric"
+                        elif "neoforged" in uid:
+                            loader = "neoforge"
+                        elif "minecraftforge" in uid:
+                            loader = "forge"
+                        elif "quilt-loader" in uid:
+                            loader = "quilt"
+            except Exception:
+                pass
+
+        # Determine minecraft folder
+        minecraft_path = os.path.join(path, "minecraft")
+        if not os.path.exists(minecraft_path):
+            minecraft_path = os.path.join(path, ".minecraft")
+
+        return InstanceInfo(name, path, mc_version, loader, minecraft_path)
+
+class InstanceSelectScreen(Screen):
+    def __init__(self, instances: List[InstanceInfo]):
+        super().__init__()
+        self.instances = instances
+
+    def compose(self) -> ComposeResult:
+        yield Header()
+        yield Label("Select a Prism Launcher Instance:", id="title")
+        with Container(id="list-container"):
+            yield ListView(*[ListItem(Label(f"{i.name} ({i.mc_version} - {i.loader})"), id=f"inst_{idx}") 
+                           for idx, i in enumerate(self.instances)])
+        yield Footer()
+
+    def on_list_view_selected(self, event: ListView.Selected):
+        idx = int(event.item.id.split("_")[1])
+        self.app.selected_instance = self.instances[idx]
+        self.app.push_screen(SyncScreen(self.instances[idx]))
+
+class SyncScreen(Screen):
+    def __init__(self, instance: InstanceInfo):
+        super().__init__()
+        self.instance = instance
+        self.mod_list = ["infinite-storage-cell"]
+
+    def compose(self) -> ComposeResult:
+        yield Header()
+        with Vertical(id="details"):
+            yield Label(f"Instance: [bold]{self.instance.name}[/bold]")
+            yield Label(f"Version:  {self.instance.mc_version}")
+            yield Label(f"Loader:   {self.instance.loader}")
+            yield Label(f"Path:     {self.instance.minecraft_path}")
+        
+        yield Log(id="sync-log")
+        
+        with Horizontal(id="actions"):
+            yield Button("Sync & Update", variant="primary", id="btn-sync")
+            yield Button("Back", id="btn-back")
+        yield Footer()
+
+    def on_button_pressed(self, event: Button.Pressed):
+        if event.button.id == "btn-back":
+            self.app.pop_screen()
+        elif event.button.id == "btn-sync":
+            self.run_sync()
+
+    @work(exclusive=True)
+    async def run_sync(self):
+        log = self.query_one("#sync-log", Log)
+        log.write_line("Starting synchronization...")
+        
+        repo_root = os.path.dirname(os.path.abspath(__file__))
+        local_mods = os.path.join(repo_root, "mods")
+        local_config = os.path.join(repo_root, "config")
+        os.makedirs(local_mods, exist_ok=True)
+        os.makedirs(local_config, exist_ok=True)
+
+        # 1. Fetch Mods from Modrinth
+        log.write_line("\n[bold]Step 1: Fetching Mods from Modrinth[/bold]")
+        for slug in self.mod_list:
+            log.write_line(f"Checking {slug}...")
+            version_data = ModrinthAPI.get_latest_version(slug, self.instance.mc_version, self.instance.loader)
+            if version_data:
+                file_data = next((f for f in version_data['files'] if f['primary']), version_data['files'][0])
+                filename = file_data['filename']
+                url = file_data['url']
+                dest_path = os.path.join(local_mods, filename)
+                
+                if not os.path.exists(dest_path):
+                    log.write_line(f"Downloading {filename}...")
+                    try:
+                        resp = requests.get(url, stream=True)
+                        if resp.status_code == 200:
+                            with open(dest_path, 'wb') as f:
+                                for chunk in resp.iter_content(chunk_size=8192):
+                                    f.write(chunk)
+                            log.write_line(f"Successfully downloaded {filename}")
+                        else:
+                            log.write_line(f"Error downloading {filename}: {resp.status_code}")
+                    except Exception as e:
+                        log.write_line(f"Error: {e}")
+                else:
+                    log.write_line(f"Mod {filename} already present in local mods folder.")
+            else:
+                log.write_line(f"No compatible version found for {slug}")
+
+        # 2. Sync to Instance
+        log.write_line("\n[bold]Step 2: Syncing to Instance[/bold]")
+        
+        dst_mods = os.path.join(self.instance.minecraft_path, "mods")
+        dst_config = os.path.join(self.instance.minecraft_path, "config")
+        os.makedirs(dst_mods, exist_ok=True)
+        os.makedirs(dst_config, exist_ok=True)
+
+        # Copy Mods (Missing Only)
+        log.write_line("Copying missing mods...")
+        for item in os.listdir(local_mods):
+            s = os.path.join(local_mods, item)
+            d = os.path.join(dst_mods, item)
+            if not os.path.exists(d):
+                shutil.copy2(s, d)
+                log.write_line(f"Added {item}")
+
+        # Copy Configs (Overwrite)
+        log.write_line("Updating configurations...")
+        if os.path.exists(local_config):
+            for root, dirs, files in os.walk(local_config):
+                rel_path = os.path.relpath(root, local_config)
+                dest_root = os.path.join(dst_config, rel_path)
+                os.makedirs(dest_root, exist_ok=True)
+                for f in files:
+                    shutil.copy2(os.path.join(root, f), os.path.join(dest_root, f))
+            log.write_line("Configurations updated.")
+
+        log.write_line("\n[bold green]Success: Sync Complete![/bold green]")
+        self.query_one("#btn-sync", Button).label = "Sync Again"
+
+class MCManagerApp(App):
+    CSS = """
+    #list-container {
+        height: 10;
+        border: solid green;
+        margin: 1;
+    }
+    #details {
+        background: $boost;
+        padding: 1;
+        margin-bottom: 1;
+    }
+    #sync-log {
+        height: 1fr;
+        border: double gray;
+        margin: 1 0;
+    }
+    #actions {
+        height: 3;
+        align: center middle;
+    }
+    Button {
+        margin: 0 1;
+    }
+    #title {
+        text-align: center;
+        width: 100%;
+        color: $accent;
+    }
+    """
+    BINDINGS = [("q", "quit", "Quit")]
+
+    def on_mount(self) -> None:
+        appdata = os.environ.get("APPDATA")
+        if not appdata:
+            self.exit("APPDATA environment variable not found.")
+            return
+
+        base_path = os.path.join(appdata, "PrismLauncher", "instances")
+        scanner = InstanceScanner(base_path)
+        instances = scanner.scan()
+        
+        if not instances:
+            self.exit(f"No Prism Launcher instances found in {base_path}")
+            return
+
+        self.push_screen(InstanceSelectScreen(instances))
+
+if __name__ == "__main__":
+    app = MCManagerApp()
+    app.run()
