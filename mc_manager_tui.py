@@ -151,15 +151,15 @@ class SyncManager:
 
                 version_data = ModrinthAPI.get_latest_version(mod_slug, self.instance.mc_version, self.instance.loader)
                 if version_data:
+                    # ... (keep existing Modrinth download logic) ...
                     project_id = version_data['project_id']
                     latest_ver = version_data['version_number']
-                    
+
                     deps = version_data.get('dependencies', [])
                     for dep in deps:
                         if dep.get('dependency_type') == 'required':
                             dep_id = dep.get('project_id')
                             if dep_id and dep_id not in processed_norm:
-                                # Fetch dependency info to show name in UI while checking
                                 dep_info = ModrinthAPI.get_project_info(dep_id)
                                 dep_name = dep_info.get("title", dep_id) if dep_info else dep_id
                                 if self.status_callback:
@@ -170,7 +170,7 @@ class SyncManager:
                     filename, url = file_data['filename'], file_data['url']
                     new_mod_path = os.path.join(dst_mods, filename)
                     old_info = mod_meta.get(project_id)
-                    
+
                     if isinstance(old_info, dict):
                         old_filename, old_version = old_info.get("file"), old_info.get("version", "Unknown")
                     else:
@@ -194,8 +194,12 @@ class SyncManager:
                         if self.status_callback: self.status_callback(ui_key, latest_ver, latest_ver, "[green]Up to date[/green]")
                         mod_meta[project_id] = {"file": filename, "version": latest_ver}
                 else:
-                    self.logger(f"  [yellow]No compatible version found for {display_name}[/yellow]")
-                    if self.status_callback: self.status_callback(ui_key, "N/A", "N/A", "[yellow]No compat ver[/yellow]")
+                    # FALLBACK TO CURSEFORGE
+                    self.logger(f"  [yellow]No Modrinth version for {display_name}. Trying CurseForge...[/yellow]")
+                    if self.status_callback:
+                        self.status_callback(ui_key, "Manual", "CF Fallback", "[yellow]Modrinth miss, using CF...[/yellow]")
+                    self.handle_cf_mod(ui_key, mod_slug, dst_mods, dst_backups)
+
 
             # Deduplicate final list for mods.json
             deduped_slugs = set()
