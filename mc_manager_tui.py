@@ -21,6 +21,13 @@ try:
 except ImportError:
     TUI_AVAILABLE = False
 
+try:
+    from rich.console import Console
+    from rich import print as rprint
+    RICH_AVAILABLE = True
+except ImportError:
+    RICH_AVAILABLE = False
+
 @dataclass
 class InstanceInfo:
     name: str
@@ -181,7 +188,7 @@ class SyncManager:
                 sync_s = "[green]Applied[/green]" if inst_mod and not ModScanner.is_newer(inst_ver, mod.version) else ("[cyan]Update Pending[/cyan]" if inst_mod else "[yellow]Not Applied[/yellow]")
                 if self.status_callback: self.status_callback(mod.name, mod.version, inst_ver, "...", "...", sync_s, "")
 
-            self.logger("\n[bold]Checking for mod updates in background...[/bold]")
+            self.logger("\n[bold]Checking for mod updates...[/bold]")
             for mod in local_mods:
                 upd = APIClient.check_modrinth(mod.mod_id, self.instance.mc_version, self.instance.loader)
                 if not upd: upd = APIClient.check_curseforge(mod.name, self.instance.mc_version, self.instance.loader)
@@ -247,6 +254,20 @@ class InstanceScanner:
         m_p = os.path.join(path, "minecraft")
         if not os.path.exists(m_p): m_p = os.path.join(path, ".minecraft")
         return InstanceInfo(name, path, mv, ldr, m_p)
+
+def cli_logger(msg: str):
+    if RICH_AVAILABLE:
+        rprint(msg)
+    else:
+        # Simple ANSI fallback for common rich tags
+        m = msg.replace("[bold]", "\033[1m").replace("[/bold]", "\033[22m")
+        m = m.replace("[green]", "\033[32m").replace("[/green]", "\033[39m")
+        m = m.replace("[red]", "\033[31m").replace("[/red]", "\033[39m")
+        m = m.replace("[yellow]", "\033[33m").replace("[/yellow]", "\033[39m")
+        m = m.replace("[cyan]", "\033[36m").replace("[/cyan]", "\033[39m")
+        m = m.replace("[bold green]", "\033[1;32m")
+        m = m.replace("[bold red]", "\033[1;31m")
+        print(m + "\033[0m")
 
 if TUI_AVAILABLE:
     class InstanceSelectScreen(Screen):
@@ -331,9 +352,11 @@ def main():
         scanner = InstanceScanner(base_path); instances = scanner.scan()
         instance = next((i for i in instances if i.name == args.instance or os.path.basename(i.path) == args.instance), None)
         if not instance: print(f"Error: Instance '{args.instance}' not found."); sys.exit(1)
-        manager = SyncManager(instance, print); manager.run()
+        cli_logger(f"Starting CLI sync for: [bold cyan]{instance.name}[/bold cyan] ({instance.mc_version})")
+        manager = SyncManager(instance, cli_logger)
+        manager.run()
     else:
-        if not TUI_AVAILABLE: print("Error: Textual library not found. Run with an instance name for CLI mode or install textual."); sys.exit(1)
+        if not TUI_AVAILABLE: print("Error: Textual library not found. Use CLI mode by providing an instance name."); sys.exit(1)
         app = MCManagerApp(); app.run()
 
 if __name__ == "__main__":
