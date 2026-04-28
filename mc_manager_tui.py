@@ -159,7 +159,7 @@ class SyncScreen(Screen):
 
     def on_mount(self) -> None:
         table = self.query_one(DataTable)
-        table.add_columns("Mod", "Current Version", "Latest Version", "Status")
+        self.columns = table.add_columns("Mod", "Current Version", "Latest Version", "Status")
         for mod in self.mod_list:
             table.add_row(mod, "Pending...", "Pending...", "Ready")
 
@@ -175,6 +175,9 @@ class SyncScreen(Screen):
         table = self.query_one(DataTable)
         log.write_line("Starting synchronization...")
         
+        # Column indices/keys for easier access
+        col_mod, col_curr, col_latest, col_status = self.columns
+
         try:
             repo_root = os.path.dirname(os.path.abspath(__file__))
             local_config = os.path.join(repo_root, "config")
@@ -210,7 +213,7 @@ class SyncScreen(Screen):
                     continue
                 processed.add(slug_or_id)
 
-                # Update status in table if it exists
+                # Find existing row or add new one
                 row_key = None
                 for key in table.rows:
                     if table.get_row(key)[0] == slug_or_id:
@@ -218,9 +221,8 @@ class SyncScreen(Screen):
                         break
                 
                 if row_key:
-                    table.update_cell(row_key, "Status", "[yellow]Checking...[/yellow]")
+                    table.update_cell(row_key, col_status, "[yellow]Checking...[/yellow]")
                 else:
-                    # Add row for dependencies
                     row_key = table.add_row(slug_or_id, "N/A", "Pending...", "[yellow]Checking...[/yellow]")
 
                 version_data = ModrinthAPI.get_latest_version(slug_or_id, self.instance.mc_version, self.instance.loader)
@@ -228,7 +230,7 @@ class SyncScreen(Screen):
                 if version_data:
                     project_id = version_data['project_id']
                     latest_ver = version_data['version_number']
-                    table.update_cell(row_key, "Latest Version", latest_ver)
+                    table.update_cell(row_key, col_latest, latest_ver)
 
                     deps = version_data.get('dependencies', [])
                     for dep in deps:
@@ -242,19 +244,22 @@ class SyncScreen(Screen):
                     url = file_data['url']
                     
                     new_mod_path = os.path.join(dst_mods, filename)
-                    old_info = mod_meta.get(project_id) # Now a dict: {"file": "...", "version": "..."}
+                    old_info = mod_meta.get(project_id)
                     
-                    if isinstance(old_info, str): # Backward compatibility
+                    if isinstance(old_info, str):
                         old_filename = old_info
                         old_version = "Unknown"
+                    elif isinstance(old_info, dict):
+                        old_filename = old_info.get("file")
+                        old_version = old_info.get("version", "Unknown")
                     else:
-                        old_filename = old_info.get("file") if old_info else None
-                        old_version = old_info.get("version") if old_info else "None"
+                        old_filename = None
+                        old_version = "None"
 
-                    table.update_cell(row_key, "Current Version", old_version if old_filename else "Not Installed")
+                    table.update_cell(row_key, col_curr, old_version if old_filename else "Not Installed")
 
                     if old_filename and old_filename != filename:
-                        table.update_cell(row_key, "Status", "[cyan]Update Available[/cyan]")
+                        table.update_cell(row_key, col_status, "[cyan]Update Available[/cyan]")
                         old_path = os.path.join(dst_mods, old_filename)
                         if os.path.exists(old_path):
                             log.write_line(f"Updating {slug_or_id}: Backing up {old_filename}...")
@@ -262,32 +267,32 @@ class SyncScreen(Screen):
                             shutil.move(old_path, backup_path)
                         
                         log.write_line(f"  -> Downloading {filename}...")
-                        table.update_cell(row_key, "Status", "[blue]Updating...[/blue]")
+                        table.update_cell(row_key, col_status, "[blue]Updating...[/blue]")
                         if self.download_mod(url, new_mod_path, log):
                             mod_meta[project_id] = {"file": filename, "version": latest_ver}
-                            table.update_cell(row_key, "Status", "[green]Updated[/green]")
-                            table.update_cell(row_key, "Current Version", latest_ver)
+                            table.update_cell(row_key, col_status, "[green]Updated[/green]")
+                            table.update_cell(row_key, col_curr, latest_ver)
                             updated_count += 1
                         else:
-                            table.update_cell(row_key, "Status", "[red]Failed[/red]")
-                    
+                            table.update_cell(row_key, col_status, "[red]Failed[/red]")
+                
                     elif not os.path.exists(new_mod_path):
                         log.write_line(f"Installing {slug_or_id} -> {filename}...")
-                        table.update_cell(row_key, "Status", "[blue]Installing...[/blue]")
+                        table.update_cell(row_key, col_status, "[blue]Installing...[/blue]")
                         if self.download_mod(url, new_mod_path, log):
                             mod_meta[project_id] = {"file": filename, "version": latest_ver}
-                            table.update_cell(row_key, "Status", "[green]Installed[/green]")
-                            table.update_cell(row_key, "Current Version", latest_ver)
+                            table.update_cell(row_key, col_status, "[green]Installed[/green]")
+                            table.update_cell(row_key, col_curr, latest_ver)
                             installed_count += 1
                         else:
-                            table.update_cell(row_key, "Status", "[red]Failed[/red]")
+                            table.update_cell(row_key, col_status, "[red]Failed[/red]")
                     else:
                         log.write_line(f"Mod {filename} is up to date.")
-                        table.update_cell(row_key, "Status", "[green]Up to date[/green]")
+                        table.update_cell(row_key, col_status, "[green]Up to date[/green]")
                         mod_meta[project_id] = {"file": filename, "version": latest_ver}
                 else:
                     log.write_line(f"  [yellow]No compatible version found for {slug_or_id}[/yellow]")
-                    table.update_cell(row_key, "Status", "[yellow]No compat ver[/yellow]")
+                    table.update_cell(row_key, col_status, "[yellow]No compat ver[/yellow]")
 
             with open(meta_path, 'w') as f:
                 json.dump(mod_meta, f, indent=4)
@@ -308,9 +313,12 @@ class SyncScreen(Screen):
 
             log.write_line("\n[bold green]Success: Sync Complete![/bold green]")
         except Exception as e:
-            log.write_line(f"\n[bold red]FATAL ERROR: {str(e)}[/bold red]")
             import traceback
-            log.write_line(traceback.format_exc())
+            error_msg = f"FATAL ERROR: {str(e)}\n{traceback.format_exc()}"
+            log.write_line(f"\n[bold red]FATAL ERROR: {str(e)}[/bold red]")
+            log.write_line("See error.log for details.")
+            with open("error.log", "w", encoding="utf-8") as f:
+                f.write(error_msg)
             
         self.query_one("#btn-sync", Button).label = "Sync Again"
 
