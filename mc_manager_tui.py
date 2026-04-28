@@ -4,6 +4,9 @@ import shutil
 import sys
 import requests
 import argparse
+import webbrowser
+import time
+from datetime import datetime
 from typing import Optional, List, Dict, Callable
 from dataclasses import dataclass
 
@@ -58,11 +61,18 @@ class ModrinthAPI:
         return None
 
 class SyncManager:
+    CF_LOADER_IDS = {
+        "forge": 1,
+        "fabric": 4,
+        "quilt": 5,
+        "neoforge": 6
+    }
+
     def __init__(self, instance: InstanceInfo, mod_list: List[str], logger: Callable[[str], None], status_callback: Optional[Callable[[str, str, str, str], None]] = None):
         self.instance = instance
         self.mod_list = mod_list
         self.logger = logger
-        self.status_callback = status_callback # mod_id, curr_ver, latest_ver, status
+        self.status_callback = status_callback # mod_name, curr_ver, latest_ver, status
 
     def run(self):
         try:
@@ -91,21 +101,6 @@ class SyncManager:
 
             self.logger("\n[bold]Step 1: Checking Mods & Required Dependencies[/bold]")
             
-            # Sync Manual Downloads first
-            self.logger("\nSyncing manual_downloads folder...")
-            for item in os.listdir(local_manual):
-                if item.endswith(".jar"):
-                    src = os.path.join(local_manual, item)
-                    dst = os.path.join(dst_mods, item)
-                    if not os.path.exists(dst):
-                        shutil.copy2(src, dst)
-                        self.logger(f"  [green]Copied {item} to instance[/green]")
-                        if self.status_callback:
-                            self.status_callback(item, "N/A", "Manual", "[green]Synced (Manual)[/green]")
-                    else:
-                        if self.status_callback:
-                            self.status_callback(item, "Manual", "Manual", "[green]Up to date[/green]")
-
             to_process = list(self.mod_list)
             processed = set()
             updated_count = 0
@@ -113,21 +108,28 @@ class SyncManager:
             resolved_slugs = set()
 
             while to_process:
-                slug_or_id = to_process.pop(0)
-                if slug_or_id in processed:
+                raw_slug = to_process.pop(0)
+                if raw_slug in processed:
                     continue
-                processed.add(slug_or_id)
+                processed.add(raw_slug)
 
-                project_info = ModrinthAPI.get_project_info(slug_or_id)
+                # --- Handle CurseForge Mods ---
+                if raw_slug.startswith("cf:"):
+                    slug = raw_slug[3:]
+                    resolved_slugs.add(raw_slug)
+                    self.handle_cf_mod(slug, dst_mods, dst_backups)
+                    continue
+
+                # --- Handle Modrinth Mods ---
+                project_info = ModrinthAPI.get_project_info(raw_slug)
                 if not project_info:
-                    # Might be a mod that's only on CF or a broken slug
                     if self.status_callback:
-                        self.status_callback(slug_or_id, "N/A", "Unknown", "[yellow]Not on Modrinth[/yellow]")
-                    resolved_slugs.add(slug_or_id)
+                        self.status_callback(raw_slug, "N/A", "Unknown", "[yellow]Not on Modrinth[/yellow]")
+                    resolved_slugs.add(raw_slug)
                     continue
 
-                display_name = project_info.get("title", slug_or_id)
-                mod_slug = project_info.get("slug", slug_or_id)
+                display_name = project_info.get("title", raw_slug)
+                mod_slug = project_info.get("slug", raw_slug)
                 resolved_slugs.add(mod_slug)
 
                 if self.status_callback:
@@ -153,37 +155,20 @@ class SyncManager:
                     new_mod_path = os.path.join(dst_mods, filename)
                     old_info = mod_meta.get(project_id)
                     
-                    if isinstance(old_info, str):
-                        old_filename = old_info
-                        old_version = "Unknown"
-                    elif isinstance(old_info, dict):
+                    if isinstance(old_info, dict):
                         old_filename = old_info.get("file")
                         old_version = old_info.get("version", "Unknown")
                     else:
-                        old_filename = None
-                        old_version = "None"
+                        old_filename = old_info if isinstance(old_info, str) else None
+                        old_version = "Unknown" if old_filename else "None"
 
                     curr_ver_display = old_version if old_filename else "Not Installed"
                     if self.status_callback:
                         self.status_callback(display_name, curr_ver_display, latest_ver, "[yellow]Processing...[/yellow]")
 
                     if old_filename and old_filename != filename:
-                        if self.status_callback:
-                            self.status_callback(display_name, curr_ver_display, latest_ver, "[cyan]Update Available[/cyan]")
-                        
-                        old_path = os.path.join(dst_mods, old_filename)
-                        if os.path.exists(old_path):
-                            self.logger(f"Updating {display_name}: Backing up {old_filename}...")
-                            backup_path = os.path.join(dst_backups, f"{old_filename}.bak")
-                            shutil.move(old_path, backup_path)
-                        
-                        self.logger(f"  -> Downloading {filename}...")
-                        if self.download_mod(url, new_mod_path):
-                            mod_meta[project_id] = {"file": filename, "version": latest_ver}
-                            if self.status_callback:
-                                self.status_callback(display_name, latest_ver, latest_ver, "[green]Updated[/green]")
-                            updated_count += 1
-                    
+                        self.backup_and_download(display_name, old_filename, filename, url, dst_mods, dst_backups, new_mod_path, project_id, latest_ver, mod_meta)
+                        updated_count += 1
                     elif not os.path.exists(new_mod_path):
                         self.logger(f"Installing {display_name} -> {filename}...")
                         if self.download_mod(url, new_mod_path):
@@ -201,15 +186,13 @@ class SyncManager:
                     if self.status_callback:
                         self.status_callback(display_name, "N/A", "N/A", "[yellow]No compat ver[/yellow]")
 
-            # Update mods.json with resolved SLUGS only
+            # Update mods.json
             if set(self.mod_list) != resolved_slugs:
                 self.logger("\nUpdating mods.json with resolved slugs...")
                 self.save_mod_list(repo_root, list(resolved_slugs))
 
             with open(meta_path, 'w') as f:
                 json.dump(mod_meta, f, indent=4)
-
-            self.logger(f"\nSummary: {installed_count} installed, {updated_count} updated.")
 
             self.logger("\n[bold]Step 2: Syncing Configurations[/bold]")
             if os.path.exists(local_config):
@@ -233,6 +216,80 @@ class SyncManager:
                 f.write(error_msg)
             return False
 
+    def handle_cf_mod(self, slug: str, dst_mods: str, dst_backups: str):
+        loader_id = self.CF_LOADER_IDS.get(self.instance.loader.lower(), 1)
+        url = f"https://www.curseforge.com/minecraft/mc-mods/{slug}/files?version={self.instance.mc_version}&gameVersionTypeId={loader_id}"
+        
+        self.logger(f"\n[bold cyan]CurseForge Mod: {slug}[/bold cyan]")
+        self.logger(f"Opening browser to download page...")
+        
+        if self.status_callback:
+            self.status_callback(slug, "Manual", "Latest", "[blue]Waiting for download...[/blue]")
+        
+        webbrowser.open(url)
+        
+        # Monitor Downloads folder
+        downloads_path = os.path.join(os.path.expanduser("~"), "Downloads")
+        self.logger(f"Monitoring {downloads_path} for new .jar file...")
+        
+        start_time = time.time()
+        timeout = 120 # 2 minutes
+        
+        # Snapshot of current jars
+        initial_jars = {f for f in os.listdir(downloads_path) if f.endswith(".jar")}
+        
+        found_file = None
+        while time.time() - start_time < timeout:
+            current_jars = {f for f in os.listdir(downloads_path) if f.endswith(".jar")}
+            new_jars = current_jars - initial_jars
+            if new_jars:
+                # Take the most recently modified one if multiple
+                found_file = max(new_jars, key=lambda x: os.path.getmtime(os.path.join(downloads_path, x)))
+                break
+            time.sleep(1)
+        
+        if found_file:
+            src = os.path.join(downloads_path, found_file)
+            dst = os.path.join(dst_mods, found_file)
+            
+            # Simple check to avoid deleting random jars
+            if slug.replace("-", "").lower() in found_file.replace("_", "").lower() or slug.lower() in found_file.lower():
+                self.logger(f"Found {found_file}. Moving to instance...")
+                
+                # Check for existing version of this mod (very basic check)
+                for item in os.listdir(dst_mods):
+                    if item != found_file and (slug.lower() in item.lower() or slug.replace("-","").lower() in item.lower()):
+                        self.logger(f"Backing up old version: {item}")
+                        shutil.move(os.path.join(dst_mods, item), os.path.join(dst_backups, f"{item}.bak"))
+                
+                shutil.move(src, dst)
+                self.logger(f"  [green]Successfully installed {found_file}[/green]")
+                if self.status_callback:
+                    self.status_callback(slug, "Installed", "Latest", "[green]Synced (Manual)[/green]")
+            else:
+                self.logger(f"[yellow]Warning: Found {found_file} but it doesn't seem to match slug {slug}. Skipping.[/yellow]")
+                if self.status_callback:
+                    self.status_callback(slug, "Manual", "Latest", "[yellow]Mismatch in Downloads[/yellow]")
+        else:
+            self.logger(f"[red]Timeout: No new .jar found in Downloads for {slug}.[/red]")
+            if self.status_callback:
+                self.status_callback(slug, "Manual", "Latest", "[red]Download Timeout[/red]")
+
+    def backup_and_download(self, display_name, old_filename, filename, url, dst_mods, dst_backups, new_mod_path, project_id, latest_ver, mod_meta):
+        old_path = os.path.join(dst_mods, old_filename)
+        if os.path.exists(old_path):
+            self.logger(f"Updating {display_name}: Backing up {old_filename}...")
+            backup_path = os.path.join(dst_backups, f"{old_filename}.bak")
+            shutil.move(old_path, backup_path)
+        
+        self.logger(f"  -> Downloading {filename}...")
+        if self.download_mod(url, new_mod_path):
+            mod_meta[project_id] = {"file": filename, "version": latest_ver}
+            if self.status_callback:
+                self.status_callback(display_name, latest_ver, latest_ver, "[green]Updated[/green]")
+            return True
+        return False
+
     def download_mod(self, url, path) -> bool:
         try:
             resp = requests.get(url, stream=True)
@@ -241,8 +298,7 @@ class SyncManager:
                     for chunk in resp.iter_content(chunk_size=8192):
                         f.write(chunk)
                 return True
-        except Exception:
-            pass
+        except Exception: pass
         return False
 
     def save_mod_list(self, repo_root: str, mods: List[str]):
@@ -250,25 +306,20 @@ class SyncManager:
         try:
             with open(mods_json, 'w') as f:
                 json.dump(sorted(list(set(mods))), f, indent=4)
-        except Exception:
-            pass
+        except Exception: pass
 
 class InstanceScanner:
     def __init__(self, base_path: str):
         self.base_path = base_path
-
     def scan(self) -> List[InstanceInfo]:
         instances = []
-        if not os.path.exists(self.base_path):
-            return []
+        if not os.path.exists(self.base_path): return []
         for folder in os.listdir(self.base_path):
             path = os.path.join(self.base_path, folder)
             if os.path.isdir(path):
                 info = self.parse_instance(path)
-                if info:
-                    instances.append(info)
+                if info: instances.append(info)
         return sorted(instances, key=lambda x: x.name)
-
     def parse_instance(self, path: str) -> Optional[InstanceInfo]:
         cfg_path = os.path.join(path, "instance.cfg")
         pack_path = os.path.join(path, "mmc-pack.json")
@@ -294,8 +345,7 @@ class InstanceScanner:
                         elif "quilt-loader" in uid: loader = "quilt"
             except Exception: pass
         minecraft_path = os.path.join(path, "minecraft")
-        if not os.path.exists(minecraft_path):
-            minecraft_path = os.path.join(path, ".minecraft")
+        if not os.path.exists(minecraft_path): minecraft_path = os.path.join(path, ".minecraft")
         return InstanceInfo(name, path, mc_version, loader, minecraft_path)
 
 if TUI_AVAILABLE:
@@ -303,15 +353,12 @@ if TUI_AVAILABLE:
         def __init__(self, instances: List[InstanceInfo]):
             super().__init__()
             self.instances = instances
-
         def compose(self) -> ComposeResult:
             yield Header()
             yield Label("Select a Prism Launcher Instance:", id="title")
             with Container(id="list-container"):
-                yield ListView(*[ListItem(Label(f"{i.name} ({i.mc_version} - {i.loader})"), id=f"inst_{idx}") 
-                               for idx, i in enumerate(self.instances)])
+                yield ListView(*[ListItem(Label(f"{i.name} ({i.mc_version} - {i.loader})"), id=f"inst_{idx}") for idx, i in enumerate(self.instances)])
             yield Footer()
-
         def on_list_view_selected(self, event: ListView.Selected):
             idx = int(event.item.id.split("_")[1])
             self.app.selected_instance = self.instances[idx]
@@ -322,17 +369,14 @@ if TUI_AVAILABLE:
             super().__init__()
             self.instance = instance
             self.mod_list = self.load_mod_list()
-
         def load_mod_list(self) -> List[str]:
             repo_root = os.path.dirname(os.path.abspath(__file__))
             mods_json = os.path.join(repo_root, "mods.json")
             if os.path.exists(mods_json):
                 try:
-                    with open(mods_json, 'r') as f:
-                        return json.load(f)
+                    with open(mods_json, 'r') as f: return json.load(f)
                 except Exception: pass
             return ["infinite-storage-cell"]
-
         def compose(self) -> ComposeResult:
             yield Header()
             with Vertical(id="details"):
@@ -346,47 +390,33 @@ if TUI_AVAILABLE:
                 yield Button("Sync & Update", variant="primary", id="btn-sync")
                 yield Button("Back", id="btn-back")
             yield Footer()
-
         def on_mount(self) -> None:
             table = self.query_one(DataTable)
             self.columns = table.add_columns("Mod", "Current Version", "Latest Version", "Status")
-            for mod in self.mod_list:
-                table.add_row(mod, "Pending...", "Pending...", "Ready")
-            # Auto-start sync on mount
+            for mod in self.mod_list: table.add_row(mod, "Pending...", "Pending...", "Ready")
             self.run_sync()
-
         def on_button_pressed(self, event: Button.Pressed):
-            if event.button.id == "btn-back":
-                self.app.pop_screen()
-            elif event.button.id == "btn-sync":
-                self.run_sync()
-
+            if event.button.id == "btn-back": self.app.pop_screen()
+            elif event.button.id == "btn-sync": self.run_sync()
         @work(exclusive=True)
         async def run_sync(self):
             log = self.query_one("#sync-log", Log)
             table = self.query_one(DataTable)
-            
             def status_cb(mod_name, curr, latest, status):
                 row_key = None
                 for key in table.rows:
-                    if table.get_row(key)[0] == mod_name:
-                        row_key = key
-                        break
-                if not row_key:
-                    row_key = table.add_row(mod_name, curr, latest, status)
+                    if table.get_row(key)[0] == mod_name: row_key = key; break
+                if not row_key: row_key = table.add_row(mod_name, curr, latest, status)
                 else:
                     if curr: table.update_cell(row_key, self.columns[1], curr)
                     if latest: table.update_cell(row_key, self.columns[2], latest)
                     table.update_cell(row_key, self.columns[3], status)
-
             manager = SyncManager(self.instance, self.mod_list, log.write_line, status_cb)
             await self.run_in_thread(manager.run)
             self.query_one("#btn-sync", Button).label = "Sync Again"
-
         async def run_in_thread(self, func):
             import asyncio
-            loop = asyncio.get_event_loop()
-            return await loop.run_in_executor(None, func)
+            return await asyncio.get_event_loop().run_in_executor(None, func)
 
     class MCManagerApp(App):
         CSS = """
@@ -403,47 +433,31 @@ if TUI_AVAILABLE:
             appdata = os.environ.get("APPDATA")
             base_path = os.path.join(appdata, "PrismLauncher", "instances") if appdata else ""
             instances = InstanceScanner(base_path).scan()
-            if not instances:
-                self.exit(f"No instances found in {base_path}")
-                return
+            if not instances: self.exit(f"No instances found in {base_path}"); return
             self.push_screen(InstanceSelectScreen(instances))
 
 def main():
     parser = argparse.ArgumentParser(description="Minecraft Instance Manager")
     parser.add_argument("instance", nargs="?", help="Instance name for CLI mode (skips TUI)")
     args = parser.parse_args()
-
     appdata = os.environ.get("APPDATA")
-    if not appdata:
-        print("Error: APPDATA environment variable not found.")
-        sys.exit(1)
+    if not appdata: print("Error: APPDATA environment variable not found."); sys.exit(1)
     base_path = os.path.join(appdata, "PrismLauncher", "instances")
-    
     if args.instance:
-        # CLI Mode
         scanner = InstanceScanner(base_path)
         instances = scanner.scan()
         instance = next((i for i in instances if i.name == args.instance or os.path.basename(i.path) == args.instance), None)
-        
-        if not instance:
-            print(f"Error: Instance '{args.instance}' not found.")
-            sys.exit(1)
-            
+        if not instance: print(f"Error: Instance '{args.instance}' not found."); sys.exit(1)
         repo_root = os.path.dirname(os.path.abspath(__file__))
         mods_json = os.path.join(repo_root, "mods.json")
         mod_list = ["infinite-storage-cell"]
         if os.path.exists(mods_json):
-            with open(mods_json, 'r') as f:
-                mod_list = json.load(f)
-        
+            with open(mods_json, 'r') as f: mod_list = json.load(f)
         print(f"Starting CLI sync for: {instance.name} ({instance.mc_version})")
         manager = SyncManager(instance, mod_list, print)
         manager.run()
     else:
-        # TUI Mode
-        if not TUI_AVAILABLE:
-            print("Error: Textual library not found. Run with an instance name for CLI mode or install textual.")
-            sys.exit(1)
+        if not TUI_AVAILABLE: print("Error: Textual library not found. Run with an instance name for CLI mode or install textual."); sys.exit(1)
         app = MCManagerApp()
         app.run()
 
