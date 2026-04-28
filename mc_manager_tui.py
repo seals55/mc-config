@@ -97,7 +97,7 @@ class ModScanner:
 
     @staticmethod
     def is_newer(current: str, latest: str) -> bool:
-        if not latest or latest == "Unknown": return False
+        if not latest or latest == "Unknown" or latest == "...": return False
         if current == latest: return False
         def normalize(v: str) -> str:
             v = re.sub(r'\[.*?\]', '', v)
@@ -187,7 +187,7 @@ class SyncManager:
             for mod in local_mods:
                 inst_mod = inst_map.get(mod.mod_id); inst_ver = inst_mod.version if inst_mod else "Missing"
                 sync_s = "[green]Applied[/green]" if inst_mod and not ModScanner.is_newer(inst_ver, mod.version) else ("[cyan]Update Pending[/cyan]" if inst_mod else "[yellow]Not Applied[/yellow]")
-                if self.status_callback: self.status_callback(mod.name, mod.version, inst_ver, "Scanning", "Checking updates", sync_s, "")
+                if self.status_callback: self.status_callback(mod.name, mod.version, inst_ver, "...", "...", sync_s, "")
 
             self.logger("\n[bold]Checking for mod updates...[/bold]")
             for mod in local_mods:
@@ -289,7 +289,7 @@ if TUI_AVAILABLE:
             with Vertical(id="details"):
                 yield Label(f"Instance: [bold]{self.instance.name}[/bold]")
                 yield Label(f"Version:  {self.instance.mc_version} | Loader: {self.instance.loader}")
-            yield DataTable(id="mod-table"); yield Log(id="sync-log")
+            yield DataTable(id="mod-table"); yield Log(id="sync-log", markup=True)
             with Horizontal(id="actions"):
                 yield Button("Sync & Check Updates", variant="primary", id="btn-sync"); yield Button("Back", id="btn-back")
             yield Footer()
@@ -306,18 +306,18 @@ if TUI_AVAILABLE:
         
         def tui_logger(self, msg: str):
             log = self.query_one("#sync-log", Log)
-            if RICH_AVAILABLE: log.write(Text.from_markup(msg + "\n"))
-            else: log.write_line(msg)
+            log.write(msg + "\n")
 
         @work(exclusive=True)
         async def run_sync(self):
-            table = self.query_one(DataTable); table.clear(); self.links = {}
+            log, table = self.query_one("#sync-log", Log), self.query_one(DataTable)
+            table.clear(); self.links = {}
             def status_cb(name, local, instance, latest, status, sync, link):
                 row_key = None
                 for key in table.rows:
                     if table.get_row(key)[0] == name: row_key = key; break
                 
-                # Render markup for table cells
+                # DataTable cells can handle Rich Text directly
                 r_status = Text.from_markup(status) if RICH_AVAILABLE else status
                 r_sync = Text.from_markup(sync) if RICH_AVAILABLE else sync
                 
@@ -330,7 +330,8 @@ if TUI_AVAILABLE:
             
             manager = SyncManager(self.instance, self.tui_logger, status_cb)
             import asyncio
-            await asyncio.get_event_loop().run_in_executor(None, manager.run)
+            loop = asyncio.get_event_loop()
+            await loop.run_in_executor(None, manager.run)
             self.query_one("#btn-sync", Button).label = "Re-Sync"
 
     class MCManagerApp(App):
