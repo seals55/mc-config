@@ -9,7 +9,7 @@ import time
 import re
 import zipfile
 from typing import Optional, List, Dict, Callable, Set, Tuple
-from dataclasses import dataclass
+from dataclasses import dataclass, asdict
 
 try:
     from textual.app import App, ComposeResult
@@ -91,22 +91,45 @@ class ModScanner:
     def is_newer(current: str, latest: str) -> bool:
         if not latest or latest == "Unknown": return False
         if current == latest: return False
-        
         def normalize(v: str) -> str:
             v = re.sub(r'\[.*?\]', '', v)
             v = v.split('|')[0]
             v = re.sub(r'^[0-9.]+-', '', v.strip())
             v = re.split(r'[-+ ]', v.strip())[0]
             return v.strip().lower()
+        nc, nl = normalize(current), normalize(latest)
+        return nc != nl and nl != ""
 
-        norm_curr = normalize(current)
-        norm_latest = normalize(latest)
-        if norm_curr == norm_latest: return False
-        return norm_curr != norm_latest
+class APICache:
+    def __init__(self):
+        self.path = "api_cache.json"
+        self.data = {}
+        if os.path.exists(self.path):
+            try:
+                with open(self.path, 'r') as f: self.data = json.load(f)
+            except: pass
+
+    def get(self, key: str):
+        entry = self.data.get(key)
+        if entry and time.time() - entry['ts'] < 86400: # 24h cache
+            return entry['val']
+        return None
+
+    def set(self, key: str, val: Dict):
+        self.data[key] = {'ts': time.time(), 'val': val}
+        try:
+            with open(self.path, 'w') as f: json.dump(self.data, f)
+        except: pass
 
 class APIClient:
+    cache = APICache()
+
     @staticmethod
     def check_modrinth(mod_id: str, mc_version: str, loader: str) -> Optional[Dict]:
+        cache_key = f"mr_{mod_id}_{mc_version}_{loader}"
+        cached = APIClient.cache.get(cache_key)
+        if cached: return cached
+
         url = f"https://api.modrinth.com/v2/project/{mod_id}/version"
         loaders = [loader.lower()]
         if loader.lower() == "neoforge": loaders.append("forge")
@@ -117,104 +140,96 @@ class APIClient:
                 versions = resp.json()
                 if versions:
                     v = versions[0]
-                    return {"version": v["version_number"], "url": f"https://modrinth.com/mod/{mod_id}", "source": "Modrinth"}
-        except Exception: pass
+                    res = {"version": v["version_number"], "url": f"https://modrinth.com/mod/{mod_id}", "source": "Modrinth"}
+                    APIClient.cache.set(cache_key, res)
+                    return res
+        except: pass
         return None
 
     @staticmethod
     def check_curseforge(name: str, mc_version: str, loader: str) -> Optional[Dict]:
         slug = name.lower().replace(" ", "-").replace("?", "")
+        cache_key = f"cf_{slug}_{mc_version}_{loader}"
+        cached = APIClient.cache.get(cache_key)
+        if cached: return cached
+
         url = f"https://api.cfwidget.com/minecraft/mc-mods/{slug}"
         try:
             resp = requests.get(url, timeout=5)
             if resp.status_code == 200:
                 data = resp.json()
-                version_files = data.get("versions", {}).get(mc_version, [])
-                for f in version_files:
+                res = None
+                for f in data.get("versions", {}).get(mc_version, []):
                     if any(loader.lower() in v.lower() for v in f.get("versions", [])):
-                        return {"version": f.get("display", f.get("name", "Unknown")), "url": f"https://www.curseforge.com/minecraft/mc-mods/{slug}", "source": "CurseForge"}
-                for f in data.get("files", []):
-                    f_vers = f.get("versions", [])
-                    if mc_version in f_vers and any(loader.lower() in v.lower() for v in f_vers):
-                        return {"version": f.get("display", f.get("name", "Unknown")), "url": f"https://www.curseforge.com/minecraft/mc-mods/{slug}", "source": "CurseForge"}
-        except Exception: pass
+                        res = {"version": f.get("display", f.get("name", "Unknown")), "url": f"https://www.curseforge.com/minecraft/mc-mods/{slug}", "source": "CurseForge"}
+                        break
+                if not res:
+                    for f in data.get("files", []):
+                        f_vers = f.get("versions", [])
+                        if mc_version in f_vers and any(loader.lower() in v.lower() for v in f_vers):
+                            res = {"version": f.get("display", f.get("name", "Unknown")), "url": f"https://www.curseforge.com/minecraft/mc-mods/{slug}", "source": "CurseForge"}
+                            break
+                if res: APIClient.cache.set(cache_key, res)
+                return res
+        except: pass
         return None
 
 class SyncManager:
     def __init__(self, instance: InstanceInfo, logger: Callable[[str], None], status_callback: Optional[Callable[[str, str, str, str, str, str, str], None]] = None):
         self.instance = instance
         self.logger = logger
-        self.status_callback = status_callback # name, local, instance, latest, status, sync_status, link
+        self.status_callback = status_callback 
 
     def run(self):
         try:
             repo_root = os.path.dirname(os.path.abspath(__file__))
-            local_mods_dir = os.path.join(repo_root, "mods")
-            dst_mods = os.path.join(self.instance.minecraft_path, "mods")
+            local_mods_dir, dst_mods = os.path.join(repo_root, "mods"), os.path.join(self.instance.minecraft_path, "mods")
             dst_backups = os.path.join(self.instance.minecraft_path, "backups", "mods")
             os.makedirs(dst_mods, exist_ok=True); os.makedirs(dst_backups, exist_ok=True)
 
-            self.logger(f"\n[bold]Scanning instance mods...[/bold]")
-            instance_mods = ModScanner.get_local_mods(dst_mods)
-            inst_map = {m.mod_id: m for m in instance_mods}
-
-            self.logger(f"[bold]Scanning local repository mods...[/bold]")
+            inst_mods = ModScanner.get_local_mods(dst_mods)
+            inst_map = {m.mod_id: m for m in inst_mods}
             local_mods = ModScanner.get_local_mods(local_mods_dir)
-            if not local_mods: self.logger("[yellow]No mods found in local mods/ folder.[/yellow]")
 
+            # Initial fast display
             for mod in local_mods:
-                self.logger(f"Mod: {mod.name} (Local: {mod.version})")
+                inst_mod = inst_map.get(mod.mod_id)
+                inst_ver = inst_mod.version if inst_mod else "Missing"
+                sync_status = "[green]Applied[/green]" if inst_mod and not ModScanner.is_newer(inst_ver, mod.version) else ("[cyan]Update Pending[/cyan]" if inst_mod else "[yellow]Not Applied[/yellow]")
+                if self.status_callback:
+                    self.status_callback(mod.name, mod.version, inst_ver, "...", "...", sync_status, "")
+
+            self.logger("\n[bold]Checking for mod updates in background...[/bold]")
+            for mod in local_mods:
+                update_info = APIClient.check_modrinth(mod.mod_id, self.instance.mc_version, self.instance.loader)
+                if not update_info: update_info = APIClient.check_curseforge(mod.name, self.instance.mc_version, self.instance.loader)
                 
                 inst_mod = inst_map.get(mod.mod_id)
                 inst_ver = inst_mod.version if inst_mod else "Missing"
-                
-                if self.status_callback:
-                    self.status_callback(mod.name, mod.version, inst_ver, "Checking...", "Checking...", "Checking...", "")
-
-                update_info = APIClient.check_modrinth(mod.mod_id, self.instance.mc_version, self.instance.loader)
-                if not update_info:
-                    update_info = APIClient.check_curseforge(mod.name, self.instance.mc_version, self.instance.loader)
-
                 status, latest_ver, link = "[green]Up to date[/green]", mod.version, ""
                 if update_info:
                     latest_ver, link = update_info["version"], update_info["url"]
-                    if ModScanner.is_newer(mod.version, latest_ver):
-                        status = f"[cyan]Update available ({update_info['source']})[/cyan]"
+                    if ModScanner.is_newer(mod.version, latest_ver): status = f"[cyan]Update available ({update_info['source']})[/cyan]"
 
-                # Instance Sync Status
-                sync_status = "[green]Applied[/green]"
-                if not inst_mod:
-                    sync_status = "[yellow]Not Applied[/yellow]"
-                elif ModScanner.is_newer(inst_ver, mod.version):
-                    sync_status = "[cyan]Update Pending[/cyan]"
-
+                sync_status = "[green]Applied[/green]" if inst_mod and not ModScanner.is_newer(inst_ver, mod.version) else ("[cyan]Update Pending[/cyan]" if inst_mod else "[yellow]Not Applied[/yellow]")
+                
                 if self.status_callback:
                     self.status_callback(mod.name, mod.version, inst_ver, latest_ver, status, sync_status, link)
 
-                # Sync to instance
                 dst_path = os.path.join(dst_mods, mod.filename)
                 if not os.path.exists(dst_path):
-                    # Remove/Backup other versions
                     for item in os.listdir(dst_mods):
-                        # Use a very broad check for mod ID in filename if we don't have perfect mapping
                         if mod.mod_id.lower() in item.lower() and item != mod.filename:
-                            self.logger(f"  Backing up old version in instance: {item}")
-                            shutil.move(os.path.join(dst_mods, item), os.path.join(dst_backups, f"{item}.bak"))
-                    
-                    self.logger(f"  Copying {mod.filename} to instance...")
-                    shutil.copy2(mod.path, dst_path)
-                    if self.status_callback:
-                        self.status_callback(mod.name, mod.version, mod.version, latest_ver, status, "[green]Applied[/green]", link)
+                            self.logger(f"  Backing up {item}"); shutil.move(os.path.join(dst_mods, item), os.path.join(dst_backups, f"{item}.bak"))
+                    self.logger(f"  Copying {mod.filename}..."); shutil.copy2(mod.path, dst_path)
+                    if self.status_callback: self.status_callback(mod.name, mod.version, mod.version, latest_ver, status, "[green]Applied[/green]", link)
 
-            # Sync Configs
-            local_config = os.path.join(repo_root, "config")
-            dst_config = os.path.join(self.instance.minecraft_path, "config")
+            local_config, dst_config = os.path.join(repo_root, "config"), os.path.join(self.instance.minecraft_path, "config")
             if os.path.exists(local_config):
                 self.logger("\n[bold]Step 2: Syncing Configurations[/bold]")
                 count = 0
                 for root, dirs, files in os.walk(local_config):
-                    rel = os.path.relpath(root, local_config)
-                    d_root = os.path.join(dst_config, rel)
+                    rel = os.path.relpath(root, local_config); d_root = os.path.join(dst_config, rel)
                     os.makedirs(d_root, exist_ok=True)
                     for f in files: shutil.copy2(os.path.join(root, f), os.path.join(d_root, f)); count += 1
                 self.logger(f"Updated {count} configuration files.")
@@ -267,10 +282,9 @@ if TUI_AVAILABLE:
         def __init__(self, instances: List[InstanceInfo]):
             super().__init__(); self.instances = instances
         def compose(self) -> ComposeResult:
-            yield Header()
-            yield Label("Select a Prism Launcher Instance:", id="title")
+            yield Header(); yield Label("Select a Prism Launcher Instance:", id="title")
             with Container(id="list-container"):
-                yield ListView(*[ListItem(Label(f"{i.name} ({i.mc_version} - {i.loader})"), id=f"inst_{idx}") for idx, i in enumerate(self.instances)])
+                yield ListView(*[ListItem(Label(f"{i.name} ({i.mc_v} - {i.loader})"), id=f"inst_{idx}") for idx, i in enumerate(self.instances)])
             yield Footer()
         def on_list_view_selected(self, event: ListView.Selected):
             idx = int(event.item.id.split("_")[1]); self.app.selected_instance = self.instances[idx]; self.app.push_screen(SyncScreen(self.instances[idx]))
@@ -283,8 +297,7 @@ if TUI_AVAILABLE:
             with Vertical(id="details"):
                 yield Label(f"Instance: [bold]{self.instance.name}[/bold]")
                 yield Label(f"Version:  {self.instance.mc_version} | Loader: {self.instance.loader}")
-            yield DataTable(id="mod-table")
-            yield Log(id="sync-log")
+            yield DataTable(id="mod-table"); yield Log(id="sync-log")
             with Horizontal(id="actions"):
                 yield Button("Sync & Check Updates", variant="primary", id="btn-sync"); yield Button("Back", id="btn-back")
             yield Footer()
