@@ -62,8 +62,9 @@ class ModScanner:
     def parse_jar(path: str) -> Optional[Dict]:
         try:
             with zipfile.ZipFile(path, 'r') as jar:
+                names = jar.namelist()
                 # 1. Check for Fabric/Quilt
-                if "fabric.mod.json" in jar.namelist():
+                if "fabric.mod.json" in names:
                     with jar.open("fabric.mod.json") as f:
                         data = json.load(f)
                         return {"id": data.get("id"), "name": data.get("name"), "version": data.get("version")}
@@ -85,7 +86,7 @@ class ModScanner:
                                 }
                 
                 # 3. Check for Old Forge
-                if "mcmod.info" in jar.namelist():
+                if "mcmod.info" in names:
                     with jar.open("mcmod.info") as f:
                         data = json.load(f)
                         if isinstance(data, list): data = data[0]
@@ -94,10 +95,28 @@ class ModScanner:
             pass
         return None
 
+    @staticmethod
+    def is_newer(current: str, latest: str) -> bool:
+        """Smarter version comparison that handles MC versions and build info."""
+        if not latest or latest == "Unknown": return False
+        if current == latest: return False
+        
+        def normalize(v: str) -> str:
+            # Remove common MC version prefixes (e.g., 1.21.1-1.3 -> 1.3)
+            v = re.sub(r'^[0-9.]+-', '', v)
+            # Remove common suffixes like +fabric, -forge, etc.
+            v = re.split(r'[-+]', v)[0]
+            return v
+
+        norm_curr = normalize(current)
+        norm_latest = normalize(latest)
+        
+        if norm_curr == norm_latest: return False
+        return norm_curr != norm_latest
+
 class APIClient:
     @staticmethod
     def check_modrinth(mod_id: str, mc_version: str, loader: str) -> Optional[Dict]:
-        # Modrinth often uses the internal ID or slug
         url = f"https://api.modrinth.com/v2/project/{mod_id}/version"
         loaders = [loader.lower()]
         if loader.lower() == "neoforge": loaders.append("forge")
@@ -118,8 +137,7 @@ class APIClient:
 
     @staticmethod
     def check_curseforge(name: str, mc_version: str, loader: str) -> Optional[Dict]:
-        # CurseForge check is harder without ID, but we can try slug based on name
-        slug = name.lower().replace(" ", "-")
+        slug = name.lower().replace(" ", "-").replace("?", "")
         url = f"https://api.cfwidget.com/minecraft/mc-mods/{slug}"
         try:
             resp = requests.get(url, timeout=5)
@@ -170,36 +188,14 @@ class SyncManager:
 
                 status = "[green]Up to date[/green]"
                 latest_ver = mod.version
-                @staticmethod
-                def is_newer(current: str, latest: str) -> bool:
-                    """Smarter version comparison that handles MC versions and build info."""
-                    if not latest or latest == "Unknown": return False
-                    if current == latest: return False
+                link = ""
 
-                    def normalize(v: str) -> str:
-                        # Remove common MC version prefixes (e.g., 1.21.1-1.3 -> 1.3)
-                        v = re.sub(r'^[0-9.]+-', '', v)
-                        # Remove common suffixes like +fabric, -forge, etc.
-                        v = re.split(r'[-+]', v)[0]
-                        return v
-
-                    norm_curr = normalize(current)
-                    norm_latest = normalize(latest)
-
-                    if norm_curr == norm_latest: return False
-
-                    # Fallback to simple check if normalization didn't help
-                    return norm_curr != norm_latest
-
-                class SyncManager:
-                ...
-                            if update_info:
-                                latest_ver = update_info["version"]
-                                link = update_info["url"]
-                                if ModScanner.is_newer(mod.version, latest_ver):
-                                    status = f"[cyan]Update available ({update_info['source']})[/cyan]"
-                                    self.logger(f"  [cyan]Update found: {latest_ver} at {link}[/cyan]")
-
+                if update_info:
+                    latest_ver = update_info["version"]
+                    link = update_info["url"]
+                    if ModScanner.is_newer(mod.version, latest_ver):
+                        status = f"[cyan]Update available ({update_info['source']})[/cyan]"
+                        self.logger(f"  [cyan]Update found: {latest_ver} at {link}[/cyan]")
                 
                 if self.status_callback:
                     self.status_callback(mod.name, mod.version, latest_ver, status, link)
@@ -307,21 +303,14 @@ if TUI_AVAILABLE:
         def on_mount(self) -> None:
             table = self.query_one(DataTable)
             self.columns = table.add_columns("Mod", "Local Version", "Latest Version", "Status")
-            table.add_row("Scanning...", "", "", "")
             self.run_sync()
-
         def on_button_pressed(self, event: Button.Pressed):
             if event.button.id == "btn-back": self.app.pop_screen()
             elif event.button.id == "btn-sync": self.run_sync()
-        
         def on_data_table_cell_selected(self, event: DataTable.CellSelected):
-            # If status or version cell selected and has link, open it
             row_data = self.query_one(DataTable).get_row(event.cell_key.row_key)
-            # Find the link stored in a hidden way or matched by mod name
-            # For simplicity, we'll search for the link in the log or store it in a dict
             if hasattr(self, "links") and row_data[0] in self.links:
                 webbrowser.open(self.links[row_data[0]])
-
         @work(exclusive=True)
         async def run_sync(self):
             log, table = self.query_one("#sync-log", Log), self.query_one(DataTable)
@@ -337,11 +326,9 @@ if TUI_AVAILABLE:
                     table.update_cell(row_key, self.columns[2], latest)
                     table.update_cell(row_key, self.columns[3], status)
                 if link: self.links[name] = link
-
             manager = SyncManager(self.instance, log.write_line, status_cb)
             await self.run_in_thread(manager.run)
             self.query_one("#btn-sync", Button).label = "Re-Sync"
-
         async def run_in_thread(self, func):
             import asyncio
             return await asyncio.get_event_loop().run_in_executor(None, func)
