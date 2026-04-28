@@ -6,8 +6,9 @@ import requests
 import argparse
 import webbrowser
 import time
-from datetime import datetime
-from typing import Optional, List, Dict, Callable
+import re
+import zipfile
+from typing import Optional, List, Dict, Callable, Set, Tuple
 from dataclasses import dataclass
 
 try:
@@ -25,288 +26,194 @@ class InstanceInfo:
     name: str
     path: str
     mc_version: str
-    loader: str # forge, neoforge, fabric, quilt, vanilla
+    loader: str
     minecraft_path: str
 
-class ModrinthAPI:
+@dataclass
+class LocalMod:
+    filename: str
+    mod_id: str
+    name: str
+    version: str
+    path: str
+
+class ModScanner:
     @staticmethod
-    def get_project_info(slug_or_id: str):
-        url = f"https://api.modrinth.com/v2/project/{slug_or_id}"
-        try:
-            resp = requests.get(url, timeout=10)
-            if resp.status_code == 200:
-                return resp.json()
-        except Exception:
-            return None
-        return None
+    def get_local_mods(mods_dir: str) -> List[LocalMod]:
+        local_mods = []
+        if not os.path.exists(mods_dir):
+            return []
+        
+        for file in os.listdir(mods_dir):
+            if file.endswith(".jar"):
+                path = os.path.join(mods_dir, file)
+                mod_info = ModScanner.parse_jar(path)
+                if mod_info:
+                    local_mods.append(LocalMod(
+                        filename=file,
+                        mod_id=mod_info.get("id", file),
+                        name=mod_info.get("name", file),
+                        version=mod_info.get("version", "Unknown"),
+                        path=path
+                    ))
+        return local_mods
 
     @staticmethod
-    def get_latest_version(slug: str, mc_version: str, loader: str):
-        url = f"https://api.modrinth.com/v2/project/{slug}/version"
+    def parse_jar(path: str) -> Optional[Dict]:
+        try:
+            with zipfile.ZipFile(path, 'r') as jar:
+                # 1. Check for Fabric/Quilt
+                if "fabric.mod.json" in jar.namelist():
+                    with jar.open("fabric.mod.json") as f:
+                        data = json.load(f)
+                        return {"id": data.get("id"), "name": data.get("name"), "version": data.get("version")}
+                
+                # 2. Check for Forge/NeoForge (Modern)
+                if "META-INF/mods.toml" in jar.namelist():
+                    with jar.open("META-INF/mods.toml") as f:
+                        content = f.read().decode('utf-8', errors='ignore')
+                        # Simple regex to get id/name/version from toml
+                        mod_id = re.search(r'modId\s*=\s*["\']([^"\']+)["\']', content)
+                        name = re.search(r'displayName\s*=\s*["\']([^"\']+)["\']', content)
+                        version = re.search(r'version\s*=\s*["\']([^"\']+)["\']', content)
+                        return {
+                            "id": mod_id.group(1) if mod_id else None,
+                            "name": name.group(1) if name else None,
+                            "version": version.group(1) if version else "Unknown"
+                        }
+                
+                # 3. Check for Old Forge
+                if "mcmod.info" in jar.namelist():
+                    with jar.open("mcmod.info") as f:
+                        data = json.load(f)
+                        if isinstance(data, list): data = data[0]
+                        return {"id": data.get("modid"), "name": data.get("name"), "version": data.get("version")}
+        except Exception:
+            pass
+        return None
+
+class APIClient:
+    @staticmethod
+    def check_modrinth(mod_id: str, mc_version: str, loader: str) -> Optional[Dict]:
+        # Modrinth often uses the internal ID or slug
+        url = f"https://api.modrinth.com/v2/project/{mod_id}/version"
         loaders = [loader.lower()]
-        if loader.lower() == "neoforge":
-            loaders.append("forge")
-            
-        params = {
-            "loaders": json.dumps(loaders),
-            "game_versions": json.dumps([mc_version])
-        }
+        if loader.lower() == "neoforge": loaders.append("forge")
+        params = {"loaders": json.dumps(loaders), "game_versions": json.dumps([mc_version])}
         try:
-            response = requests.get(url, params=params, timeout=10)
-            if response.status_code == 200:
-                versions = response.json()
-                return versions[0] if versions else None
-        except Exception:
-            return None
+            resp = requests.get(url, params=params, timeout=5)
+            if resp.status_code == 200:
+                versions = resp.json()
+                if versions:
+                    v = versions[0]
+                    return {
+                        "version": v["version_number"],
+                        "url": f"https://modrinth.com/mod/{mod_id}",
+                        "source": "Modrinth"
+                    }
+        except Exception: pass
         return None
 
-class CurseForgeAPI:
     @staticmethod
-    def get_latest_file_id(slug: str, mc_version: str, loader: str) -> Optional[int]:
+    def check_curseforge(name: str, mc_version: str, loader: str) -> Optional[Dict]:
+        # CurseForge check is harder without ID, but we can try slug based on name
+        slug = name.lower().replace(" ", "-")
         url = f"https://api.cfwidget.com/minecraft/mc-mods/{slug}"
         try:
-            resp = requests.get(url, timeout=10)
+            resp = requests.get(url, timeout=5)
             if resp.status_code == 200:
                 data = resp.json()
                 version_files = data.get("versions", {}).get(mc_version, [])
                 for f in version_files:
                     if any(loader.lower() in v.lower() for v in f.get("versions", [])):
-                        return f.get("id")
-                files = data.get("files", [])
-                for f in files:
-                    f_versions = f.get("versions", [])
-                    if mc_version in f_versions and any(loader.lower() in v.lower() for v in f_versions):
-                        return f.get("id")
+                        return {
+                            "version": f.get("display", "Unknown"),
+                            "url": f"https://www.curseforge.com/minecraft/mc-mods/{slug}",
+                            "source": "CurseForge"
+                        }
         except Exception: pass
         return None
 
 class SyncManager:
-    CF_LOADER_IDS = {"forge": 1, "fabric": 4, "quilt": 5, "neoforge": 6}
-
-    def __init__(self, instance: InstanceInfo, mod_list: List[str], logger: Callable[[str], None], status_callback: Optional[Callable[[str, str, str, str], None]] = None):
+    def __init__(self, instance: InstanceInfo, logger: Callable[[str], None], status_callback: Optional[Callable[[str, str, str, str, str], None]] = None):
         self.instance = instance
-        self.mod_list = mod_list
         self.logger = logger
-        self.status_callback = status_callback 
+        self.status_callback = status_callback # name, curr, latest, status, link
 
     def run(self):
         try:
             repo_root = os.path.dirname(os.path.abspath(__file__))
-            local_config = os.path.join(repo_root, "config")
-            local_manual = os.path.join(repo_root, "manual_downloads")
-            os.makedirs(local_config, exist_ok=True)
-            os.makedirs(local_manual, exist_ok=True)
-
+            local_mods_dir = os.path.join(repo_root, "mods")
             dst_mods = os.path.join(self.instance.minecraft_path, "mods")
-            dst_config = os.path.join(self.instance.minecraft_path, "config")
             dst_backups = os.path.join(self.instance.minecraft_path, "backups", "mods")
-            meta_path = os.path.join(self.instance.minecraft_path, "mod_meta.json")
             
             os.makedirs(dst_mods, exist_ok=True)
-            os.makedirs(dst_config, exist_ok=True)
             os.makedirs(dst_backups, exist_ok=True)
 
-            mod_meta = {}
-            if os.path.exists(meta_path):
-                try:
-                    with open(meta_path, 'r') as f: mod_meta = json.load(f)
-                except Exception: mod_meta = {}
-
-            self.logger("\n[bold]Step 1: Checking Mods & Required Dependencies[/bold]")
+            self.logger(f"\n[bold]Scanning local mods in {local_mods_dir}...[/bold]")
+            local_mods = ModScanner.get_local_mods(local_mods_dir)
             
-            to_process = list(self.mod_list)
-            processed_norm = set() # Track normalized slugs to avoid cf:mod vs mod duplication
-            updated_count = 0
-            installed_count = 0
-            final_resolved_slugs = set()
+            if not local_mods:
+                self.logger("[yellow]No mods found in local mods/ folder.[/yellow]")
 
-            while to_process:
-                raw_slug = to_process.pop(0)
-                is_cf = raw_slug.startswith("cf:")
-                norm_slug = raw_slug[3:] if is_cf else raw_slug
+            for mod in local_mods:
+                self.logger(f"Processing: {mod.name} ({mod.version})")
+                if self.status_callback:
+                    self.status_callback(mod.name, mod.version, "Checking...", "[yellow]Checking updates...[/yellow]", "")
+
+                # Check for updates
+                update_info = APIClient.check_modrinth(mod.mod_id, self.instance.mc_version, self.instance.loader)
+                if not update_info:
+                    update_info = APIClient.check_curseforge(mod.name, self.instance.mc_version, self.instance.loader)
+
+                status = "[green]Up to date[/green]"
+                latest_ver = mod.version
+                link = ""
+
+                if update_info:
+                    latest_ver = update_info["version"]
+                    link = update_info["url"]
+                    if latest_ver != mod.version:
+                        status = f"[cyan]Update available ({update_info['source']})[/cyan]"
+                        self.logger(f"  [cyan]Update found: {latest_ver} at {link}[/cyan]")
                 
-                if norm_slug in processed_norm: continue
-                processed_norm.add(norm_slug)
+                if self.status_callback:
+                    self.status_callback(mod.name, mod.version, latest_ver, status, link)
 
-                if is_cf:
-                    final_resolved_slugs.add(raw_slug)
-                    if self.handle_cf_mod(raw_slug, norm_slug, dst_mods, dst_backups):
-                        updated_count += 1 # Rough count
-                    continue
+                # Sync to instance
+                dst_path = os.path.join(dst_mods, mod.filename)
+                if not os.path.exists(dst_path):
+                    # Check if a DIFFERENT version of this mod exists (basic check)
+                    for item in os.listdir(dst_mods):
+                        if mod.mod_id.lower() in item.lower() and item != mod.filename:
+                            self.logger(f"  Backing up old version in instance: {item}")
+                            shutil.move(os.path.join(dst_mods, item), os.path.join(dst_backups, f"{item}.bak"))
+                    
+                    self.logger(f"  Copying {mod.filename} to instance...")
+                    shutil.copy2(mod.path, dst_path)
 
-                # Modrinth Logic
-                project_info = ModrinthAPI.get_project_info(norm_slug)
-                if not project_info:
-                    if self.status_callback: self.status_callback(raw_slug, "N/A", "Unknown", "[yellow]Not on Modrinth[/yellow]")
-                    final_resolved_slugs.add(raw_slug)
-                    continue
-
-                # project_info already contains title and slug
-                display_name = project_info.get("title", norm_slug)
-                mod_slug = project_info.get("slug", norm_slug)
-                final_resolved_slugs.add(mod_slug if not is_cf else raw_slug)
-
-                # Use display_name for UI key to match the row
-                ui_key = display_name 
-
-                version_data = ModrinthAPI.get_latest_version(mod_slug, self.instance.mc_version, self.instance.loader)
-                if version_data:
-                    # ... (keep existing Modrinth download logic) ...
-                    project_id = version_data['project_id']
-                    latest_ver = version_data['version_number']
-
-                    deps = version_data.get('dependencies', [])
-                    for dep in deps:
-                        if dep.get('dependency_type') == 'required':
-                            dep_id = dep.get('project_id')
-                            if dep_id and dep_id not in processed_norm:
-                                dep_info = ModrinthAPI.get_project_info(dep_id)
-                                dep_name = dep_info.get("title", dep_id) if dep_info else dep_id
-                                if self.status_callback:
-                                    self.status_callback(dep_name, "N/A", "Pending...", "[yellow]Queued dependency...[/yellow]")
-                                to_process.append(dep_id)
-
-                    file_data = next((f for f in version_data['files'] if f['primary']), version_data['files'][0])
-                    filename, url = file_data['filename'], file_data['url']
-                    new_mod_path = os.path.join(dst_mods, filename)
-                    old_info = mod_meta.get(project_id)
-
-                    if isinstance(old_info, dict):
-                        old_filename, old_version = old_info.get("file"), old_info.get("version", "Unknown")
-                    else:
-                        old_filename = old_info if isinstance(old_info, str) else None
-                        old_version = "Unknown" if old_filename else "None"
-
-                    curr_ver_display = old_version if old_filename else "Not Installed"
-                    if self.status_callback: self.status_callback(ui_key, curr_ver_display, latest_ver, "[yellow]Processing...[/yellow]")
-
-                    if old_filename and old_filename != filename:
-                        if self.backup_and_download(ui_key, display_name, old_filename, filename, url, dst_mods, dst_backups, new_mod_path, project_id, latest_ver, mod_meta):
-                            updated_count += 1
-                    elif not os.path.exists(new_mod_path):
-                        self.logger(f"Installing {display_name} -> {filename}...")
-                        if self.download_mod(url, new_mod_path):
-                            mod_meta[project_id] = {"file": filename, "version": latest_ver}
-                            if self.status_callback: self.status_callback(ui_key, latest_ver, latest_ver, "[green]Installed[/green]")
-                            installed_count += 1
-                    else:
-                        self.logger(f"Mod {filename} is up to date.")
-                        if self.status_callback: self.status_callback(ui_key, latest_ver, latest_ver, "[green]Up to date[/green]")
-                        mod_meta[project_id] = {"file": filename, "version": latest_ver}
-                else:
-                    # FALLBACK TO CURSEFORGE
-                    self.logger(f"  [yellow]No Modrinth version for {display_name}. Trying CurseForge...[/yellow]")
-                    if self.status_callback:
-                        self.status_callback(ui_key, "Manual", "CF Fallback", "[yellow]Modrinth miss, using CF...[/yellow]")
-                    self.handle_cf_mod(ui_key, mod_slug, dst_mods, dst_backups)
-
-
-            # Deduplicate final list for mods.json
-            deduped_slugs = set()
-            for s in final_resolved_slugs:
-                if s.startswith("cf:"):
-                    deduped_slugs.add(s)
-                    base = s[3:]
-                    if base in deduped_slugs: deduped_slugs.remove(base)
-                else:
-                    if f"cf:{s}" not in final_resolved_slugs: deduped_slugs.add(s)
-
-            if set(self.mod_list) != deduped_slugs:
-                self.logger("\nUpdating mods.json with resolved slugs...")
-                self.save_mod_list(repo_root, list(deduped_slugs))
-
-            with open(meta_path, 'w') as f: json.dump(mod_meta, f, indent=4)
-            self.logger(f"\nSummary: {installed_count} installed, {updated_count} updated.")
-
-            self.logger("\n[bold]Step 2: Syncing Configurations[/bold]")
+            # Sync Configs
+            local_config = os.path.join(repo_root, "config")
+            dst_config = os.path.join(self.instance.minecraft_path, "config")
             if os.path.exists(local_config):
-                config_count = 0
+                self.logger("\n[bold]Step 2: Syncing Configurations[/bold]")
+                count = 0
                 for root, dirs, files in os.walk(local_config):
-                    rel_path = os.path.relpath(root, local_config)
-                    dest_root = os.path.join(dst_config, rel_path)
-                    os.makedirs(dest_root, exist_ok=True)
+                    rel = os.path.relpath(root, local_config)
+                    d_root = os.path.join(dst_config, rel)
+                    os.makedirs(d_root, exist_ok=True)
                     for f in files:
-                        shutil.copy2(os.path.join(root, f), os.path.join(dest_root, f))
-                        config_count += 1
-                self.logger(f"Updated {config_count} configuration files.")
+                        shutil.copy2(os.path.join(root, f), os.path.join(d_root, f))
+                        count += 1
+                self.logger(f"Updated {count} configuration files.")
 
             self.logger("\n[bold green]Success: Sync Complete![/bold green]")
             return True
         except Exception as e:
             import traceback
-            error_msg = f"FATAL ERROR: {str(e)}\n{traceback.format_exc()}"
             self.logger(f"\n[bold red]FATAL ERROR: {str(e)}[/bold red]")
-            with open("error.log", "w", encoding="utf-8") as f: f.write(error_msg)
+            with open("error.log", "w", encoding="utf-8") as f: f.write(traceback.format_exc())
             return False
-
-    def handle_cf_mod(self, raw_slug: str, slug: str, dst_mods: str, dst_backups: str) -> bool:
-        self.logger(f"\n[bold cyan]CurseForge Mod: {slug}[/bold cyan]")
-        if self.status_callback: self.status_callback(raw_slug, "Manual", "Resolving...", "[yellow]Resolving File ID...[/yellow]")
-        
-        file_id = CurseForgeAPI.get_latest_file_id(slug, self.instance.mc_version, self.instance.loader)
-        if file_id:
-            url = f"https://www.curseforge.com/minecraft/mc-mods/{slug}/download/{file_id}"
-            self.logger(f"Found File ID: {file_id}. Opening direct download page...")
-        else:
-            loader_id = self.CF_LOADER_IDS.get(self.instance.loader.lower(), 1)
-            url = f"https://www.curseforge.com/minecraft/mc-mods/{slug}/files?version={self.instance.mc_version}&gameVersionTypeId={loader_id}"
-            self.logger(f"[yellow]Could not resolve File ID. Opening files page...[/yellow]")
-        
-        if self.status_callback: self.status_callback(raw_slug, "Manual", str(file_id) if file_id else "Latest", "[blue]Waiting for download...[/blue]")
-        
-        webbrowser.open(url)
-        downloads_path = os.path.join(os.path.expanduser("~"), "Downloads")
-        self.logger(f"Monitoring {downloads_path} for new .jar file...")
-        
-        start_time = time.time()
-        initial_jars = {f for f in os.listdir(downloads_path) if f.endswith(".jar")}
-        found_file = None
-        while time.time() - start_time < 120:
-            current_jars = {f for f in os.listdir(downloads_path) if f.endswith(".jar")}
-            new_jars = current_jars - initial_jars
-            if new_jars:
-                found_file = max(new_jars, key=lambda x: os.path.getmtime(os.path.join(downloads_path, x)))
-                break
-            time.sleep(1)
-        
-        if found_file and (slug.replace("-", "").lower() in found_file.replace("_", "").lower() or slug.lower() in found_file.lower()):
-            self.logger(f"Found {found_file}. Moving to instance...")
-            for item in os.listdir(dst_mods):
-                if item != found_file and (slug.lower() in item.lower() or slug.replace("-","").lower() in item.lower()):
-                    shutil.move(os.path.join(dst_mods, item), os.path.join(dst_backups, f"{item}.bak"))
-            shutil.move(os.path.join(downloads_path, found_file), os.path.join(dst_mods, found_file))
-            self.logger(f"  [green]Successfully installed {found_file}[/green]")
-            if self.status_callback: self.status_callback(raw_slug, "Installed", "Latest", "[green]Synced (Manual)[/green]")
-            return True
-        else:
-            self.logger(f"[red]Download not found or timed out.[/red]")
-            return False
-
-    def backup_and_download(self, raw_slug, display_name, old_filename, filename, url, dst_mods, dst_backups, new_mod_path, project_id, latest_ver, mod_meta):
-        old_path = os.path.join(dst_mods, old_filename)
-        if os.path.exists(old_path):
-            backup_path = os.path.join(dst_backups, f"{old_filename}.bak")
-            shutil.move(old_path, backup_path)
-        if self.download_mod(url, new_mod_path):
-            mod_meta[project_id] = {"file": filename, "version": latest_ver}
-            if self.status_callback: self.status_callback(raw_slug, latest_ver, latest_ver, "[green]Updated[/green]")
-            return True
-        return False
-
-    def download_mod(self, url, path) -> bool:
-        try:
-            resp = requests.get(url, stream=True)
-            if resp.status_code == 200:
-                with open(path, 'wb') as f:
-                    for chunk in resp.iter_content(chunk_size=8192): f.write(chunk)
-                return True
-        except Exception: pass
-        return False
-
-    def save_mod_list(self, repo_root: str, mods: List[str]):
-        try:
-            with open(os.path.join(repo_root, "mods.json"), 'w') as f: json.dump(sorted(list(set(mods))), f, indent=4)
-        except Exception: pass
 
 class InstanceScanner:
     def __init__(self, base_path: str): self.base_path = base_path
@@ -361,51 +268,56 @@ if TUI_AVAILABLE:
 
     class SyncScreen(Screen):
         def __init__(self, instance: InstanceInfo):
-            super().__init__(); self.instance = instance; self.mod_list = self.load_mod_list()
-        def load_mod_list(self) -> List[str]:
-            repo_root = os.path.dirname(os.path.abspath(__file__))
-            mods_json = os.path.join(repo_root, "mods.json")
-            if os.path.exists(mods_json):
-                try:
-                    with open(mods_json, 'r') as f: return json.load(f)
-                except Exception: pass
-            return ["cf:infinite-storage-cell"]
+            super().__init__(); self.instance = instance
         def compose(self) -> ComposeResult:
             yield Header()
             with Vertical(id="details"):
                 yield Label(f"Instance: [bold]{self.instance.name}[/bold]")
-                yield Label(f"Version:  {self.instance.mc_version}")
-                yield Label(f"Loader:   {self.instance.loader}")
-                yield Label(f"Path:     {self.instance.minecraft_path}")
+                yield Label(f"Version:  {self.instance.mc_version} | Loader: {self.instance.loader}")
             yield DataTable(id="mod-table")
             yield Log(id="sync-log")
             with Horizontal(id="actions"):
-                yield Button("Sync & Update", variant="primary", id="btn-sync")
+                yield Button("Sync & Check Updates", variant="primary", id="btn-sync")
                 yield Button("Back", id="btn-back")
             yield Footer()
         def on_mount(self) -> None:
             table = self.query_one(DataTable)
-            self.columns = table.add_columns("Mod", "Current Version", "Latest Version", "Status")
-            for mod in self.mod_list: table.add_row(mod, "Pending...", "Pending...", "Ready")
+            self.columns = table.add_columns("Mod", "Local Version", "Latest Version", "Status")
+            table.add_row("Scanning...", "", "", "")
             self.run_sync()
+
         def on_button_pressed(self, event: Button.Pressed):
             if event.button.id == "btn-back": self.app.pop_screen()
             elif event.button.id == "btn-sync": self.run_sync()
+        
+        def on_data_table_cell_selected(self, event: DataTable.CellSelected):
+            # If status or version cell selected and has link, open it
+            row_data = self.query_one(DataTable).get_row(event.cell_key.row_key)
+            # Find the link stored in a hidden way or matched by mod name
+            # For simplicity, we'll search for the link in the log or store it in a dict
+            if hasattr(self, "links") and row_data[0] in self.links:
+                webbrowser.open(self.links[row_data[0]])
+
         @work(exclusive=True)
         async def run_sync(self):
             log, table = self.query_one("#sync-log", Log), self.query_one(DataTable)
-            def status_cb(raw_slug, curr, latest, status):
+            table.clear()
+            self.links = {}
+            def status_cb(name, curr, latest, status, link):
                 row_key = None
                 for key in table.rows:
-                    if table.get_row(key)[0] == raw_slug: row_key = key; break
-                if not row_key: row_key = table.add_row(raw_slug, curr, latest, status)
+                    if table.get_row(key)[0] == name: row_key = key; break
+                if not row_key: row_key = table.add_row(name, curr, latest, status)
                 else:
-                    if curr: table.update_cell(row_key, self.columns[1], curr)
-                    if latest: table.update_cell(row_key, self.columns[2], latest)
+                    table.update_cell(row_key, self.columns[1], curr)
+                    table.update_cell(row_key, self.columns[2], latest)
                     table.update_cell(row_key, self.columns[3], status)
-            manager = SyncManager(self.instance, self.mod_list, log.write_line, status_cb)
+                if link: self.links[name] = link
+
+            manager = SyncManager(self.instance, log.write_line, status_cb)
             await self.run_in_thread(manager.run)
-            self.query_one("#btn-sync", Button).label = "Sync Again"
+            self.query_one("#btn-sync", Button).label = "Re-Sync"
+
         async def run_in_thread(self, func):
             import asyncio
             return await asyncio.get_event_loop().run_in_executor(None, func)
@@ -430,7 +342,7 @@ if TUI_AVAILABLE:
 
 def main():
     parser = argparse.ArgumentParser(description="Minecraft Instance Manager")
-    parser.add_argument("instance", nargs="?", help="Instance name for CLI mode (skips TUI)")
+    parser.add_argument("instance", nargs="?", help="Instance name for CLI mode")
     args = parser.parse_args()
     appdata = os.environ.get("APPDATA")
     if not appdata: print("Error: APPDATA environment variable not found."); sys.exit(1)
@@ -440,16 +352,10 @@ def main():
         instances = scanner.scan()
         instance = next((i for i in instances if i.name == args.instance or os.path.basename(i.path) == args.instance), None)
         if not instance: print(f"Error: Instance '{args.instance}' not found."); sys.exit(1)
-        repo_root = os.path.dirname(os.path.abspath(__file__))
-        mods_json = os.path.join(repo_root, "mods.json")
-        mod_list = ["cf:infinite-storage-cell"]
-        if os.path.exists(mods_json):
-            with open(mods_json, 'r') as f: mod_list = json.load(f)
-        print(f"Starting CLI sync for: {instance.name} ({instance.mc_version})")
-        manager = SyncManager(instance, mod_list, print)
+        manager = SyncManager(instance, print)
         manager.run()
     else:
-        if not TUI_AVAILABLE: print("Error: Textual library not found. Run with an instance name for CLI mode or install textual."); sys.exit(1)
+        if not TUI_AVAILABLE: print("Error: Textual library not found."); sys.exit(1)
         app = MCManagerApp()
         app.run()
 
