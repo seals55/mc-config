@@ -141,10 +141,10 @@ class APIClient:
         return None
 
 class SyncManager:
-    def __init__(self, instance: InstanceInfo, logger: Callable[[str], None], status_callback: Optional[Callable[[str, str, str, str, str, str], None]] = None):
+    def __init__(self, instance: InstanceInfo, logger: Callable[[str], None], status_callback: Optional[Callable[[str, str, str, str, str, str, str], None]] = None):
         self.instance = instance
         self.logger = logger
-        self.status_callback = status_callback 
+        self.status_callback = status_callback # name, local, instance, latest, status, sync_status, link
 
     def run(self):
         try:
@@ -152,43 +152,61 @@ class SyncManager:
             local_mods_dir = os.path.join(repo_root, "mods")
             dst_mods = os.path.join(self.instance.minecraft_path, "mods")
             dst_backups = os.path.join(self.instance.minecraft_path, "backups", "mods")
-            os.makedirs(dst_mods, exist_ok=True)
-            os.makedirs(dst_backups, exist_ok=True)
+            os.makedirs(dst_mods, exist_ok=True); os.makedirs(dst_backups, exist_ok=True)
 
-            self.logger(f"\n[bold]Scanning local mods...[/bold]")
+            self.logger(f"\n[bold]Scanning instance mods...[/bold]")
+            instance_mods = ModScanner.get_local_mods(dst_mods)
+            inst_map = {m.mod_id: m for m in instance_mods}
+
+            self.logger(f"[bold]Scanning local repository mods...[/bold]")
             local_mods = ModScanner.get_local_mods(local_mods_dir)
             if not local_mods: self.logger("[yellow]No mods found in local mods/ folder.[/yellow]")
 
             for mod in local_mods:
                 self.logger(f"Mod: {mod.name} (Local: {mod.version})")
+                
+                inst_mod = inst_map.get(mod.mod_id)
+                inst_ver = inst_mod.version if inst_mod else "Missing"
+                
                 if self.status_callback:
-                    self.status_callback(mod.name, mod.version, "Checking...", "Checking...", "", "")
+                    self.status_callback(mod.name, mod.version, inst_ver, "Checking...", "Checking...", "Checking...", "")
 
                 update_info = APIClient.check_modrinth(mod.mod_id, self.instance.mc_version, self.instance.loader)
                 if not update_info:
                     update_info = APIClient.check_curseforge(mod.name, self.instance.mc_version, self.instance.loader)
 
-                status, latest_ver, source, link = "[green]Up to date[/green]", mod.version, "Local", ""
-
+                status, latest_ver, link = "[green]Up to date[/green]", mod.version, ""
                 if update_info:
-                    latest_ver, link, source = update_info["version"], update_info["url"], update_info["source"]
-                    self.logger(f"  Comparing: Local='{mod.version}' with Online='{latest_ver}'")
+                    latest_ver, link = update_info["version"], update_info["url"]
                     if ModScanner.is_newer(mod.version, latest_ver):
-                        status = f"[cyan]Update available[/cyan]"
-                        self.logger(f"  [cyan]Update available on {source}![/cyan]")
-                
-                if self.status_callback:
-                    self.status_callback(mod.name, mod.version, latest_ver, status, source, link)
+                        status = f"[cyan]Update available ({update_info['source']})[/cyan]"
 
+                # Instance Sync Status
+                sync_status = "[green]Applied[/green]"
+                if not inst_mod:
+                    sync_status = "[yellow]Not Applied[/yellow]"
+                elif ModScanner.is_newer(inst_ver, mod.version):
+                    sync_status = "[cyan]Update Pending[/cyan]"
+
+                if self.status_callback:
+                    self.status_callback(mod.name, mod.version, inst_ver, latest_ver, status, sync_status, link)
+
+                # Sync to instance
                 dst_path = os.path.join(dst_mods, mod.filename)
                 if not os.path.exists(dst_path):
+                    # Remove/Backup other versions
                     for item in os.listdir(dst_mods):
+                        # Use a very broad check for mod ID in filename if we don't have perfect mapping
                         if mod.mod_id.lower() in item.lower() and item != mod.filename:
-                            self.logger(f"  Backing up old instance file: {item}")
+                            self.logger(f"  Backing up old version in instance: {item}")
                             shutil.move(os.path.join(dst_mods, item), os.path.join(dst_backups, f"{item}.bak"))
-                    self.logger(f"  Copying to instance...")
+                    
+                    self.logger(f"  Copying {mod.filename} to instance...")
                     shutil.copy2(mod.path, dst_path)
+                    if self.status_callback:
+                        self.status_callback(mod.name, mod.version, mod.version, latest_ver, status, "[green]Applied[/green]", link)
 
+            # Sync Configs
             local_config = os.path.join(repo_root, "config")
             dst_config = os.path.join(self.instance.minecraft_path, "config")
             if os.path.exists(local_config):
@@ -272,7 +290,7 @@ if TUI_AVAILABLE:
             yield Footer()
         def on_mount(self) -> None:
             table = self.query_one(DataTable)
-            self.columns = table.add_columns("Mod", "Local Version", "Latest Version", "Status", "Source")
+            self.columns = table.add_columns("Mod", "Local", "Instance", "Latest", "Update Status", "Sync Status")
             self.run_sync()
         def on_button_pressed(self, event: Button.Pressed):
             if event.button.id == "btn-back": self.app.pop_screen()
@@ -284,14 +302,15 @@ if TUI_AVAILABLE:
         async def run_sync(self):
             log, table = self.query_one("#sync-log", Log), self.query_one(DataTable)
             table.clear(); self.links = {}
-            def status_cb(name, curr, latest, status, source, link):
+            def status_cb(name, local, instance, latest, status, sync, link):
                 row_key = None
                 for key in table.rows:
                     if table.get_row(key)[0] == name: row_key = key; break
-                if not row_key: row_key = table.add_row(name, curr, latest, status, source)
+                if not row_key: row_key = table.add_row(name, local, instance, latest, status, sync)
                 else:
-                    table.update_cell(row_key, self.columns[1], curr); table.update_cell(row_key, self.columns[2], latest)
-                    table.update_cell(row_key, self.columns[3], status); table.update_cell(row_key, self.columns[4], source)
+                    table.update_cell(row_key, self.columns[1], local); table.update_cell(row_key, self.columns[2], instance)
+                    table.update_cell(row_key, self.columns[3], latest); table.update_cell(row_key, self.columns[4], status)
+                    table.update_cell(row_key, self.columns[5], sync)
                 if link: self.links[name] = link
             manager = SyncManager(self.instance, log.write_line, status_cb)
             await self.run_in_thread(manager.run); self.query_one("#btn-sync", Button).label = "Re-Sync"
