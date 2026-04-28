@@ -1,44 +1,43 @@
 # Gemini Project Context: mc-config
 
 ## Project Overview
-`mc-config` is a comprehensive utility for managing and version-controlling Minecraft configuration files for Prism Launcher instances. It features a modern Terminal User Interface (TUI) that automates instance detection, on-demand mod fetching from Modrinth, and asset synchronization.
+`mc-config` is a utility for managing Minecraft configuration files and mods for Prism Launcher instances. It uses a local-first workflow where mods are placed in a `mods/` directory and synchronized to specific instances.
 
-- **Purpose:** Centralized storage and intelligent deployment for Minecraft instances.
+- **Purpose:** Centralized storage, update checking, and intelligent deployment for Minecraft instances.
 - **Type:** Configuration & Automation Utility.
 - **Target Platform:** Prism Launcher (Windows).
-- **Core Feature:** Automatic detection of Minecraft version and mod loader (Fabric, Forge, NeoForge, Quilt).
 
 ## Directory Structure
+- `mods/`: **Primary source for mods.** Place your `.jar` files here.
 - `config/`: Source directory for configuration files.
-- `mods.json`: A list of Modrinth slugs for the mods you want to manage.
-- `mc_manager_tui.py`: The primary interactive management tool (TUI).
+- `mc_manager_tui.py`: The interactive management tool (TUI & CLI).
 - `run.bat`: Windows wrapper script for easy setup and launch.
 
-## Key Files
-- `mods.json`: Edit this file to add or remove mods. The TUI will automatically handle required dependencies.
-- `mc_manager_tui.py`: Now features recursive dependency resolution from Modrinth.
+## Key Features
+- **Auto-Detection:** Identifies mods in the `mods/` folder by peeking into JAR metadata.
+- **Update Checking:** Checks Modrinth and CurseForge for newer versions based on local mod IDs.
+- **Direct Links:** Provides clickable links in the TUI to download pages if updates are found.
+- **Instance Sync:** Synchronizes the local `mods/` and `config/` folders to selected Prism Launcher instances.
 
 ## Usage & Development
 
-### 1. Interactive Management (TUI)
-Double-click `run.bat` or run:
-```bash
-python mc_manager_tui.py
-```
-- **Automatic Sync:** The TUI now automatically starts checking and updating mods as soon as you select an instance.
+### 1. Adding Mods
+Place any mod `.jar` files you want to manage into the local `mods/` directory.
 
-### 2. Headless Management (CLI)
+### 2. Interactive Management (TUI)
+Double-click `run.bat` or run `python mc_manager_tui.py`.
+- Select an instance to start the sync and update check.
+- **Click on a mod row** in the table to open its download page if an update is available.
+
+### 3. Headless Management (CLI)
 Bypass the TUI by providing the instance name:
 ```bash
 python mc_manager_tui.py "Instance Name"
 ```
 
-### Adding More Mods
-To add more mods, add their Modrinth slugs to `mods.json`. The manager will automatically download all required dependencies and update the list.
-
 ### TUI Behavior
-- **Dependency Resolution:** Automatically identifies and downloads required library mods, persisting them to `mods.json`.
-- **Update System:** Tracks versions via `mod_meta.json` and backs up old mods to `backups/mods/`.
+- **Update System:** Tracks local versions and identifies newer releases online.
+- **Backup System:** When a mod is updated in the local folder and synced, the instance's old version is moved to `backups/mods/`.
 - **Config Sync:** Overwrites instance configurations with local versions from the project's `config/` folder.
 
 ## AI Interaction Guidelines

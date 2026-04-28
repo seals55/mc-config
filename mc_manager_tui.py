@@ -69,18 +69,20 @@ class ModScanner:
                         return {"id": data.get("id"), "name": data.get("name"), "version": data.get("version")}
                 
                 # 2. Check for Forge/NeoForge (Modern)
-                if "META-INF/mods.toml" in jar.namelist():
-                    with jar.open("META-INF/mods.toml") as f:
-                        content = f.read().decode('utf-8', errors='ignore')
-                        # Simple regex to get id/name/version from toml
-                        mod_id = re.search(r'modId\s*=\s*["\']([^"\']+)["\']', content)
-                        name = re.search(r'displayName\s*=\s*["\']([^"\']+)["\']', content)
-                        version = re.search(r'version\s*=\s*["\']([^"\']+)["\']', content)
-                        return {
-                            "id": mod_id.group(1) if mod_id else None,
-                            "name": name.group(1) if name else None,
-                            "version": version.group(1) if version else "Unknown"
-                        }
+                modern_meta = ["META-INF/neoforge.mods.toml", "META-INF/mods.toml"]
+                for meta_file in modern_meta:
+                    if meta_file in names:
+                        with jar.open(meta_file) as f:
+                            content = f.read().decode('utf-8', errors='ignore')
+                            mod_id = re.search(r'modId\s*=\s*["\']([^"\']+)["\']', content)
+                            name = re.search(r'displayName\s*=\s*["\']([^"\']+)["\']', content)
+                            version = re.search(r'version\s*=\s*["\']([^"\']+)["\']', content)
+                            if mod_id:
+                                return {
+                                    "id": mod_id.group(1),
+                                    "name": name.group(1) if name else mod_id.group(1),
+                                    "version": version.group(1) if version else "Unknown"
+                                }
                 
                 # 3. Check for Old Forge
                 if "mcmod.info" in jar.namelist():
@@ -168,14 +170,36 @@ class SyncManager:
 
                 status = "[green]Up to date[/green]"
                 latest_ver = mod.version
-                link = ""
+                @staticmethod
+                def is_newer(current: str, latest: str) -> bool:
+                    """Smarter version comparison that handles MC versions and build info."""
+                    if not latest or latest == "Unknown": return False
+                    if current == latest: return False
 
-                if update_info:
-                    latest_ver = update_info["version"]
-                    link = update_info["url"]
-                    if latest_ver != mod.version:
-                        status = f"[cyan]Update available ({update_info['source']})[/cyan]"
-                        self.logger(f"  [cyan]Update found: {latest_ver} at {link}[/cyan]")
+                    def normalize(v: str) -> str:
+                        # Remove common MC version prefixes (e.g., 1.21.1-1.3 -> 1.3)
+                        v = re.sub(r'^[0-9.]+-', '', v)
+                        # Remove common suffixes like +fabric, -forge, etc.
+                        v = re.split(r'[-+]', v)[0]
+                        return v
+
+                    norm_curr = normalize(current)
+                    norm_latest = normalize(latest)
+
+                    if norm_curr == norm_latest: return False
+
+                    # Fallback to simple check if normalization didn't help
+                    return norm_curr != norm_latest
+
+                class SyncManager:
+                ...
+                            if update_info:
+                                latest_ver = update_info["version"]
+                                link = update_info["url"]
+                                if ModScanner.is_newer(mod.version, latest_ver):
+                                    status = f"[cyan]Update available ({update_info['source']})[/cyan]"
+                                    self.logger(f"  [cyan]Update found: {latest_ver} at {link}[/cyan]")
+
                 
                 if self.status_callback:
                     self.status_callback(mod.name, mod.version, latest_ver, status, link)
