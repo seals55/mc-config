@@ -24,6 +24,7 @@ except ImportError:
 try:
     from rich.console import Console
     from rich import print as rprint
+    from rich.text import Text
     RICH_AVAILABLE = True
 except ImportError:
     RICH_AVAILABLE = False
@@ -96,7 +97,7 @@ class ModScanner:
 
     @staticmethod
     def is_newer(current: str, latest: str) -> bool:
-        if not latest or latest == "Unknown" or latest == "...": return False
+        if not latest or latest == "Unknown": return False
         if current == latest: return False
         def normalize(v: str) -> str:
             v = re.sub(r'\[.*?\]', '', v)
@@ -186,7 +187,7 @@ class SyncManager:
             for mod in local_mods:
                 inst_mod = inst_map.get(mod.mod_id); inst_ver = inst_mod.version if inst_mod else "Missing"
                 sync_s = "[green]Applied[/green]" if inst_mod and not ModScanner.is_newer(inst_ver, mod.version) else ("[cyan]Update Pending[/cyan]" if inst_mod else "[yellow]Not Applied[/yellow]")
-                if self.status_callback: self.status_callback(mod.name, mod.version, inst_ver, "...", "...", sync_s, "")
+                if self.status_callback: self.status_callback(mod.name, mod.version, inst_ver, "Scanning", "Checking updates", sync_s, "")
 
             self.logger("\n[bold]Checking for mod updates...[/bold]")
             for mod in local_mods:
@@ -203,8 +204,10 @@ class SyncManager:
                 if not os.path.exists(dst_path):
                     for item in os.listdir(dst_mods):
                         if mod.mod_id.lower() in item.lower() and item != mod.filename:
-                            self.logger(f"  Backing up {item}"); shutil.move(os.path.join(dst_mods, item), os.path.join(dst_backups, f"{item}.bak"))
-                    self.logger(f"  Copying {mod.filename}..."); shutil.copy2(mod.path, dst_path)
+                            self.logger(f"  Backing up old version in instance: {item}")
+                            shutil.move(os.path.join(dst_mods, item), os.path.join(dst_backups, f"{item}.bak"))
+                    self.logger(f"  Copying {mod.filename} to instance...")
+                    shutil.copy2(mod.path, dst_path)
                     if self.status_callback: self.status_callback(mod.name, mod.version, mod.version, latest_v, status, "[green]Applied[/green]", link)
 
             l_cfg, d_cfg = os.path.join(repo_root, "config"), os.path.join(self.instance.minecraft_path, "config")
@@ -256,17 +259,14 @@ class InstanceScanner:
         return InstanceInfo(name, path, mv, ldr, m_p)
 
 def cli_logger(msg: str):
-    if RICH_AVAILABLE:
-        rprint(msg)
+    if RICH_AVAILABLE: rprint(msg)
     else:
-        # Simple ANSI fallback for common rich tags
         m = msg.replace("[bold]", "\033[1m").replace("[/bold]", "\033[22m")
         m = m.replace("[green]", "\033[32m").replace("[/green]", "\033[39m")
         m = m.replace("[red]", "\033[31m").replace("[/red]", "\033[39m")
         m = m.replace("[yellow]", "\033[33m").replace("[/yellow]", "\033[39m")
         m = m.replace("[cyan]", "\033[36m").replace("[/cyan]", "\033[39m")
-        m = m.replace("[bold green]", "\033[1;32m")
-        m = m.replace("[bold red]", "\033[1;31m")
+        m = m.replace("[bold green]", "\033[1;32m").replace("[bold red]", "\033[1;31m")
         print(m + "\033[0m")
 
 if TUI_AVAILABLE:
@@ -303,24 +303,34 @@ if TUI_AVAILABLE:
         def on_data_table_cell_selected(self, event: DataTable.CellSelected):
             row_data = self.query_one(DataTable).get_row(event.cell_key.row_key)
             if hasattr(self, "links") and row_data[0] in self.links: webbrowser.open(self.links[row_data[0]])
+        
+        def tui_logger(self, msg: str):
+            log = self.query_one("#sync-log", Log)
+            if RICH_AVAILABLE: log.write(Text.from_markup(msg + "\n"))
+            else: log.write_line(msg)
+
         @work(exclusive=True)
         async def run_sync(self):
-            log, table = self.query_one("#sync-log", Log), self.query_one(DataTable)
-            table.clear(); self.links = {}
+            table = self.query_one(DataTable); table.clear(); self.links = {}
             def status_cb(name, local, instance, latest, status, sync, link):
                 row_key = None
                 for key in table.rows:
                     if table.get_row(key)[0] == name: row_key = key; break
-                if not row_key: row_key = table.add_row(name, local, instance, latest, status, sync)
+                
+                # Render markup for table cells
+                r_status = Text.from_markup(status) if RICH_AVAILABLE else status
+                r_sync = Text.from_markup(sync) if RICH_AVAILABLE else sync
+                
+                if not row_key: row_key = table.add_row(name, local, instance, latest, r_status, r_sync)
                 else:
                     table.update_cell(row_key, self.columns[1], local); table.update_cell(row_key, self.columns[2], instance)
-                    table.update_cell(row_key, self.columns[3], latest); table.update_cell(row_key, self.columns[4], status)
-                    table.update_cell(row_key, self.columns[5], sync)
+                    table.update_cell(row_key, self.columns[3], latest); table.update_cell(row_key, self.columns[4], r_status)
+                    table.update_cell(row_key, self.columns[5], r_sync)
                 if link: self.links[name] = link
-            manager = SyncManager(self.instance, log.write_line, status_cb)
+            
+            manager = SyncManager(self.instance, self.tui_logger, status_cb)
             import asyncio
-            loop = asyncio.get_event_loop()
-            await loop.run_in_executor(None, manager.run)
+            await asyncio.get_event_loop().run_in_executor(None, manager.run)
             self.query_one("#btn-sync", Button).label = "Re-Sync"
 
     class MCManagerApp(App):
@@ -353,8 +363,7 @@ def main():
         instance = next((i for i in instances if i.name == args.instance or os.path.basename(i.path) == args.instance), None)
         if not instance: print(f"Error: Instance '{args.instance}' not found."); sys.exit(1)
         cli_logger(f"Starting CLI sync for: [bold cyan]{instance.name}[/bold cyan] ({instance.mc_version})")
-        manager = SyncManager(instance, cli_logger)
-        manager.run()
+        manager = SyncManager(instance, cli_logger); manager.run()
     else:
         if not TUI_AVAILABLE: print("Error: Textual library not found. Use CLI mode by providing an instance name."); sys.exit(1)
         app = MCManagerApp(); app.run()
