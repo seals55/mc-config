@@ -156,13 +156,16 @@ class SyncScreen(Screen):
         log.write_line("Starting synchronization...")
         
         repo_root = os.path.dirname(os.path.abspath(__file__))
-        local_mods = os.path.join(repo_root, "mods")
         local_config = os.path.join(repo_root, "config")
-        os.makedirs(local_mods, exist_ok=True)
         os.makedirs(local_config, exist_ok=True)
 
-        # 1. Fetch Mods from Modrinth
-        log.write_line("\n[bold]Step 1: Fetching Mods from Modrinth[/bold]")
+        dst_mods = os.path.join(self.instance.minecraft_path, "mods")
+        dst_config = os.path.join(self.instance.minecraft_path, "config")
+        os.makedirs(dst_mods, exist_ok=True)
+        os.makedirs(dst_config, exist_ok=True)
+
+        # 1. Fetch Mods from Modrinth (On-Demand Download)
+        log.write_line("\n[bold]Step 1: Checking/Downloading Mods from Modrinth[/bold]")
         for slug in self.mod_list:
             log.write_line(f"Checking {slug}...")
             version_data = ModrinthAPI.get_latest_version(slug, self.instance.mc_version, self.instance.loader)
@@ -170,53 +173,43 @@ class SyncScreen(Screen):
                 file_data = next((f for f in version_data['files'] if f['primary']), version_data['files'][0])
                 filename = file_data['filename']
                 url = file_data['url']
-                dest_path = os.path.join(local_mods, filename)
                 
-                if not os.path.exists(dest_path):
-                    log.write_line(f"Downloading {filename}...")
+                # Check if the mod already exists in the INSTANCE folder
+                instance_mod_path = os.path.join(dst_mods, filename)
+                
+                if not os.path.exists(instance_mod_path):
+                    log.write_line(f"Downloading {filename} directly to instance...")
                     try:
                         resp = requests.get(url, stream=True)
                         if resp.status_code == 200:
-                            with open(dest_path, 'wb') as f:
+                            with open(instance_mod_path, 'wb') as f:
                                 for chunk in resp.iter_content(chunk_size=8192):
                                     f.write(chunk)
-                            log.write_line(f"Successfully downloaded {filename}")
+                            log.write_line(f"Successfully installed {filename}")
                         else:
                             log.write_line(f"Error downloading {filename}: {resp.status_code}")
                     except Exception as e:
                         log.write_line(f"Error: {e}")
                 else:
-                    log.write_line(f"Mod {filename} already present in local mods folder.")
+                    log.write_line(f"Mod {filename} is already installed in this instance.")
             else:
                 log.write_line(f"No compatible version found for {slug}")
 
-        # 2. Sync to Instance
-        log.write_line("\n[bold]Step 2: Syncing to Instance[/bold]")
+        # 2. Sync Configs
+        log.write_line("\n[bold]Step 2: Syncing Configurations[/bold]")
         
-        dst_mods = os.path.join(self.instance.minecraft_path, "mods")
-        dst_config = os.path.join(self.instance.minecraft_path, "config")
-        os.makedirs(dst_mods, exist_ok=True)
-        os.makedirs(dst_config, exist_ok=True)
-
-        # Copy Mods (Missing Only)
-        log.write_line("Copying missing mods...")
-        for item in os.listdir(local_mods):
-            s = os.path.join(local_mods, item)
-            d = os.path.join(dst_mods, item)
-            if not os.path.exists(d):
-                shutil.copy2(s, d)
-                log.write_line(f"Added {item}")
-
         # Copy Configs (Overwrite)
-        log.write_line("Updating configurations...")
+        log.write_line("Updating configurations from local config/ folder...")
         if os.path.exists(local_config):
+            config_count = 0
             for root, dirs, files in os.walk(local_config):
                 rel_path = os.path.relpath(root, local_config)
                 dest_root = os.path.join(dst_config, rel_path)
                 os.makedirs(dest_root, exist_ok=True)
                 for f in files:
                     shutil.copy2(os.path.join(root, f), os.path.join(dest_root, f))
-            log.write_line("Configurations updated.")
+                    config_count += 1
+            log.write_line(f"Updated {config_count} configuration files.")
 
         log.write_line("\n[bold green]Success: Sync Complete![/bold green]")
         self.query_one("#btn-sync", Button).label = "Sync Again"
