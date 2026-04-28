@@ -1,6 +1,6 @@
 [
-    "collective",
-    "infinite-storage-cell",
+    "cf:infinite-storage-cell",
+    "ae2",
     "what-durability",
-    "what-durability?"
+    "collective"
 ]
