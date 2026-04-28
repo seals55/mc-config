@@ -141,11 +141,13 @@ class SyncManager:
                     final_resolved_slugs.add(raw_slug)
                     continue
 
+                # project_info already contains title and slug
                 display_name = project_info.get("title", norm_slug)
                 mod_slug = project_info.get("slug", norm_slug)
-                final_resolved_slugs.add(mod_slug)
+                final_resolved_slugs.add(mod_slug if not is_cf else raw_slug)
 
-                if self.status_callback: self.status_callback(raw_slug, "", "", "[yellow]Checking...[/yellow]")
+                # Use display_name for UI key to match the row
+                ui_key = display_name 
 
                 version_data = ModrinthAPI.get_latest_version(mod_slug, self.instance.mc_version, self.instance.loader)
                 if version_data:
@@ -156,7 +158,13 @@ class SyncManager:
                     for dep in deps:
                         if dep.get('dependency_type') == 'required':
                             dep_id = dep.get('project_id')
-                            if dep_id: to_process.append(dep_id)
+                            if dep_id and dep_id not in processed_norm:
+                                # Fetch dependency info to show name in UI while checking
+                                dep_info = ModrinthAPI.get_project_info(dep_id)
+                                dep_name = dep_info.get("title", dep_id) if dep_info else dep_id
+                                if self.status_callback:
+                                    self.status_callback(dep_name, "N/A", "Pending...", "[yellow]Queued dependency...[/yellow]")
+                                to_process.append(dep_id)
 
                     file_data = next((f for f in version_data['files'] if f['primary']), version_data['files'][0])
                     filename, url = file_data['filename'], file_data['url']
@@ -170,24 +178,24 @@ class SyncManager:
                         old_version = "Unknown" if old_filename else "None"
 
                     curr_ver_display = old_version if old_filename else "Not Installed"
-                    if self.status_callback: self.status_callback(raw_slug, curr_ver_display, latest_ver, "[yellow]Processing...[/yellow]")
+                    if self.status_callback: self.status_callback(ui_key, curr_ver_display, latest_ver, "[yellow]Processing...[/yellow]")
 
                     if old_filename and old_filename != filename:
-                        if self.backup_and_download(raw_slug, display_name, old_filename, filename, url, dst_mods, dst_backups, new_mod_path, project_id, latest_ver, mod_meta):
+                        if self.backup_and_download(ui_key, display_name, old_filename, filename, url, dst_mods, dst_backups, new_mod_path, project_id, latest_ver, mod_meta):
                             updated_count += 1
                     elif not os.path.exists(new_mod_path):
                         self.logger(f"Installing {display_name} -> {filename}...")
                         if self.download_mod(url, new_mod_path):
                             mod_meta[project_id] = {"file": filename, "version": latest_ver}
-                            if self.status_callback: self.status_callback(raw_slug, latest_ver, latest_ver, "[green]Installed[/green]")
+                            if self.status_callback: self.status_callback(ui_key, latest_ver, latest_ver, "[green]Installed[/green]")
                             installed_count += 1
                     else:
                         self.logger(f"Mod {filename} is up to date.")
-                        if self.status_callback: self.status_callback(raw_slug, latest_ver, latest_ver, "[green]Up to date[/green]")
+                        if self.status_callback: self.status_callback(ui_key, latest_ver, latest_ver, "[green]Up to date[/green]")
                         mod_meta[project_id] = {"file": filename, "version": latest_ver}
                 else:
                     self.logger(f"  [yellow]No compatible version found for {display_name}[/yellow]")
-                    if self.status_callback: self.status_callback(raw_slug, "N/A", "N/A", "[yellow]No compat ver[/yellow]")
+                    if self.status_callback: self.status_callback(ui_key, "N/A", "N/A", "[yellow]No compat ver[/yellow]")
 
             # Deduplicate final list for mods.json
             deduped_slugs = set()
