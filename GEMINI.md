@@ -20,20 +20,25 @@
 
 ## Usage & Development
 
-### Adding More Mods
-To add more mods, simply add their Modrinth slugs to the `mods.json` file. For example:
-```json
-[
-    "infinite-storage-cell",
-    "ae2",
-    "sodium"
-]
+### 1. Interactive Management (TUI)
+Double-click `run.bat` or run:
+```bash
+python mc_manager_tui.py
 ```
-The manager will automatically find and download any **required dependency mods** (like `cloth-config` or `indium`) that are needed for your selected mods to run.
+- **Automatic Sync:** The TUI now automatically starts checking and updating mods as soon as you select an instance.
+
+### 2. Headless Management (CLI)
+Bypass the TUI by providing the instance name:
+```bash
+python mc_manager_tui.py "Instance Name"
+```
+
+### Adding More Mods
+To add more mods, add their Modrinth slugs to `mods.json`. The manager will automatically download all required dependencies and update the list.
 
 ### TUI Behavior
-- **Dependency Resolution:** When you sync, the manager checks the latest version of each mod in `mods.json`, identifies all required dependencies, and downloads them directly to the instance if they are missing.
-- **Update System:** Tracks installed mods via `mod_meta.json` in the instance folder. If a newer version of a mod is found, the old file is moved to a `backups/mods/` directory within the instance folder before the new one is downloaded.
+- **Dependency Resolution:** Automatically identifies and downloads required library mods, persisting them to `mods.json`.
+- **Update System:** Tracks versions via `mod_meta.json` and backs up old mods to `backups/mods/`.
 - **Config Sync:** Overwrites instance configurations with local versions from the project's `config/` folder.
 
 ## AI Interaction Guidelines
