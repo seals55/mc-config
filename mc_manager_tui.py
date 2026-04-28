@@ -27,11 +27,28 @@ class InstanceInfo:
 
 class ModrinthAPI:
     @staticmethod
+    def get_project_info(slug_or_id: str):
+        """Fetches project metadata (like the real name)."""
+        url = f"https://api.modrinth.com/v2/project/{slug_or_id}"
+        try:
+            resp = requests.get(url, timeout=10)
+            if resp.status_code == 200:
+                return resp.json()
+        except Exception:
+            return None
+        return None
+
+    @staticmethod
     def get_latest_version(slug: str, mc_version: str, loader: str):
         url = f"https://api.modrinth.com/v2/project/{slug}/version"
+        # NeoForge 1.21.1 sometimes matches 'neoforge' or 'forge' depending on the mod
+        loaders = [loader.lower()]
+        if loader.lower() == "neoforge":
+            loaders.append("forge") # Fallback for some neoforge-compatible forge mods
+            
         params = {
-            "loaders": f'["{loader.lower()}"]',
-            "game_versions": f'["{mc_version}"]'
+            "loaders": json.dumps(loaders),
+            "game_versions": json.dumps([mc_version])
         }
         try:
             response = requests.get(url, params=params, timeout=10)
@@ -141,6 +158,15 @@ class SyncScreen(Screen):
                 return ["infinite-storage-cell"]
         return ["infinite-storage-cell"]
 
+    def save_mod_list(self, mods: List[str]):
+        repo_root = os.path.dirname(os.path.abspath(__file__))
+        mods_json = os.path.join(repo_root, "mods.json")
+        try:
+            with open(mods_json, 'w') as f:
+                json.dump(sorted(list(set(mods))), f, indent=4)
+        except Exception:
+            pass
+
     def compose(self) -> ComposeResult:
         yield Header()
         with Vertical(id="details"):
@@ -206,6 +232,7 @@ class SyncScreen(Screen):
             processed = set()
             updated_count = 0
             installed_count = 0
+            all_resolved_slugs = set(self.mod_list)
 
             while to_process:
                 slug_or_id = to_process.pop(0)
@@ -213,19 +240,26 @@ class SyncScreen(Screen):
                     continue
                 processed.add(slug_or_id)
 
-                # Find existing row or add new one
+                # Fetch project info first to get the clean name and slug
+                project_info = ModrinthAPI.get_project_info(slug_or_id)
+                display_name = project_info.get("title", slug_or_id) if project_info else slug_or_id
+                mod_slug = project_info.get("slug", slug_or_id) if project_info else slug_or_id
+                all_resolved_slugs.add(mod_slug)
+
+                # Find or add row
                 row_key = None
                 for key in table.rows:
-                    if table.get_row(key)[0] == slug_or_id:
+                    if table.get_row(key)[0] == display_name or table.get_row(key)[0] == slug_or_id:
                         row_key = key
                         break
                 
                 if row_key:
+                    table.update_cell(row_key, col_mod, display_name)
                     table.update_cell(row_key, col_status, "[yellow]Checking...[/yellow]")
                 else:
-                    row_key = table.add_row(slug_or_id, "N/A", "Pending...", "[yellow]Checking...[/yellow]")
+                    row_key = table.add_row(display_name, "N/A", "Pending...", "[yellow]Checking...[/yellow]")
 
-                version_data = ModrinthAPI.get_latest_version(slug_or_id, self.instance.mc_version, self.instance.loader)
+                version_data = ModrinthAPI.get_latest_version(mod_slug, self.instance.mc_version, self.instance.loader)
                 
                 if version_data:
                     project_id = version_data['project_id']
@@ -262,7 +296,7 @@ class SyncScreen(Screen):
                         table.update_cell(row_key, col_status, "[cyan]Update Available[/cyan]")
                         old_path = os.path.join(dst_mods, old_filename)
                         if os.path.exists(old_path):
-                            log.write_line(f"Updating {slug_or_id}: Backing up {old_filename}...")
+                            log.write_line(f"Updating {display_name}: Backing up {old_filename}...")
                             backup_path = os.path.join(dst_backups, f"{old_filename}.bak")
                             shutil.move(old_path, backup_path)
                         
@@ -277,7 +311,7 @@ class SyncScreen(Screen):
                             table.update_cell(row_key, col_status, "[red]Failed[/red]")
                 
                     elif not os.path.exists(new_mod_path):
-                        log.write_line(f"Installing {slug_or_id} -> {filename}...")
+                        log.write_line(f"Installing {display_name} -> {filename}...")
                         table.update_cell(row_key, col_status, "[blue]Installing...[/blue]")
                         if self.download_mod(url, new_mod_path, log):
                             mod_meta[project_id] = {"file": filename, "version": latest_ver}
@@ -291,8 +325,14 @@ class SyncScreen(Screen):
                         table.update_cell(row_key, col_status, "[green]Up to date[/green]")
                         mod_meta[project_id] = {"file": filename, "version": latest_ver}
                 else:
-                    log.write_line(f"  [yellow]No compatible version found for {slug_or_id}[/yellow]")
+                    log.write_line(f"  [yellow]No compatible version found for {display_name}[/yellow]")
                     table.update_cell(row_key, col_status, "[yellow]No compat ver[/yellow]")
+
+            # Update mods.json if we found new dependencies
+            if set(self.mod_list) != all_resolved_slugs:
+                log.write_line("\nUpdating mods.json with resolved dependencies...")
+                self.save_mod_list(list(all_resolved_slugs))
+                self.mod_list = list(all_resolved_slugs)
 
             with open(meta_path, 'w') as f:
                 json.dump(mod_meta, f, indent=4)
