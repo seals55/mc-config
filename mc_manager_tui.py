@@ -8,7 +8,7 @@ from dataclasses import dataclass
 
 try:
     from textual.app import App, ComposeResult
-    from textual.widgets import Header, Footer, Button, Static, Label, ListView, ListItem, Log
+    from textual.widgets import Header, Footer, Button, Static, Label, ListView, ListItem, Log, DataTable
     from textual.containers import Container, Vertical, Horizontal
     from textual.screen import Screen
     from textual import work
@@ -148,12 +148,19 @@ class SyncScreen(Screen):
             yield Label(f"Loader:   {self.instance.loader}")
             yield Label(f"Path:     {self.instance.minecraft_path}")
         
+        yield DataTable(id="mod-table")
         yield Log(id="sync-log")
         
         with Horizontal(id="actions"):
             yield Button("Sync & Update", variant="primary", id="btn-sync")
             yield Button("Back", id="btn-back")
         yield Footer()
+
+    def on_mount(self) -> None:
+        table = self.query_one(DataTable)
+        table.add_columns("Mod", "Current Version", "Latest Version", "Status")
+        for mod in self.mod_list:
+            table.add_row(mod, "Pending...", "Pending...", "Ready")
 
     def on_button_pressed(self, event: Button.Pressed):
         if event.button.id == "btn-back":
@@ -164,6 +171,7 @@ class SyncScreen(Screen):
     @work(exclusive=True)
     async def run_sync(self):
         log = self.query_one("#sync-log", Log)
+        table = self.query_one(DataTable)
         log.write_line("Starting synchronization...")
         
         repo_root = os.path.dirname(os.path.abspath(__file__))
@@ -179,7 +187,6 @@ class SyncScreen(Screen):
         os.makedirs(dst_config, exist_ok=True)
         os.makedirs(dst_backups, exist_ok=True)
 
-        # Load metadata to track what we've installed
         mod_meta = {}
         if os.path.exists(meta_path):
             try:
@@ -188,42 +195,64 @@ class SyncScreen(Screen):
             except Exception:
                 mod_meta = {}
 
-        # 1. Fetch Mods & Dependencies
         log.write_line("\n[bold]Step 1: Checking Mods & Required Dependencies[/bold]")
         
-        to_process = set(self.mod_list)
+        to_process = list(self.mod_list)
         processed = set()
         updated_count = 0
         installed_count = 0
 
         while to_process:
-            slug_or_id = to_process.pop()
+            slug_or_id = to_process.pop(0)
             if slug_or_id in processed:
                 continue
             processed.add(slug_or_id)
+
+            # Update status in table if it exists
+            row_key = None
+            for key in table.rows:
+                if table.get_row(key)[0] == slug_or_id:
+                    row_key = key
+                    break
+            
+            if row_key:
+                table.update_cell(row_key, "Status", "[yellow]Checking...[/yellow]")
+            else:
+                # Add row for dependencies
+                row_key = table.add_row(slug_or_id, "N/A", "Pending...", "[yellow]Checking...[/yellow]")
 
             version_data = ModrinthAPI.get_latest_version(slug_or_id, self.instance.mc_version, self.instance.loader)
             
             if version_data:
                 project_id = version_data['project_id']
-                # Add required dependencies to the queue
+                latest_ver = version_data['version_number']
+                table.update_cell(row_key, "Latest Version", latest_ver)
+
                 deps = version_data.get('dependencies', [])
                 for dep in deps:
                     if dep.get('dependency_type') == 'required':
                         dep_id = dep.get('project_id')
                         if dep_id and dep_id not in processed:
-                            to_process.add(dep_id)
+                            to_process.append(dep_id)
 
                 file_data = next((f for f in version_data['files'] if f['primary']), version_data['files'][0])
                 filename = file_data['filename']
                 url = file_data['url']
                 
                 new_mod_path = os.path.join(dst_mods, filename)
-                old_filename = mod_meta.get(project_id)
+                old_info = mod_meta.get(project_id) # Now a dict: {"file": "...", "version": "..."}
+                
+                if isinstance(old_info, str): # Backward compatibility
+                    old_filename = old_info
+                    old_version = "Unknown"
+                else:
+                    old_filename = old_info.get("file") if old_info else None
+                    old_version = old_info.get("version") if old_info else "None"
 
-                # Check if we need to update/install
+                table.update_cell(row_key, "Current Version", old_version if old_filename else "Not Installed")
+
                 if old_filename and old_filename != filename:
-                    # UPDATE NEEDED
+                    table.update_cell(row_key, "Status", "[cyan]Update Available[/cyan]")
                     old_path = os.path.join(dst_mods, old_filename)
                     if os.path.exists(old_path):
                         log.write_line(f"Updating {slug_or_id}: Backing up {old_filename}...")
@@ -231,49 +260,39 @@ class SyncScreen(Screen):
                         shutil.move(old_path, backup_path)
                     
                     log.write_line(f"  -> Downloading {filename}...")
-                    self.download_mod(url, new_mod_path, log)
-                    mod_meta[project_id] = filename
-                    updated_count += 1
+                    table.update_cell(row_key, "Status", "[blue]Updating...[/blue]")
+                    if self.download_mod(url, new_mod_path, log):
+                        mod_meta[project_id] = {"file": filename, "version": latest_ver}
+                        table.update_cell(row_key, "Status", "[green]Updated[/green]")
+                        table.update_cell(row_key, "Current Version", latest_ver)
+                        updated_count += 1
+                    else:
+                        table.update_cell(row_key, "Status", "[red]Failed[/red]")
                 
                 elif not os.path.exists(new_mod_path):
-                    # NEW INSTALL
                     log.write_line(f"Installing {slug_or_id} -> {filename}...")
-                    self.download_mod(url, new_mod_path, log)
-                    mod_meta[project_id] = filename
-                    installed_count += 1
+                    table.update_cell(row_key, "Status", "[blue]Installing...[/blue]")
+                    if self.download_mod(url, new_mod_path, log):
+                        mod_meta[project_id] = {"file": filename, "version": latest_ver}
+                        table.update_cell(row_key, "Status", "[green]Installed[/green]")
+                        table.update_cell(row_key, "Current Version", latest_ver)
+                        installed_count += 1
+                    else:
+                        table.update_cell(row_key, "Status", "[red]Failed[/red]")
                 else:
-                    # ALREADY UP TO DATE
                     log.write_line(f"Mod {filename} is up to date.")
-                    mod_meta[project_id] = filename # Ensure meta is synced
+                    table.update_cell(row_key, "Status", "[green]Up to date[/green]")
+                    mod_meta[project_id] = {"file": filename, "version": latest_ver}
             else:
                 log.write_line(f"  [yellow]No compatible version found for {slug_or_id}[/yellow]")
+                table.update_cell(row_key, "Status", "[yellow]No compat ver[/yellow]")
 
-        # Save updated metadata
         with open(meta_path, 'w') as f:
             json.dump(mod_meta, f, indent=4)
 
         log.write_line(f"\nSummary: {installed_count} installed, {updated_count} updated.")
 
-        # 2. Sync Configs
         log.write_line("\n[bold]Step 2: Syncing Configurations[/bold]")
-        # ... rest of the sync logic ...
-
-    def download_mod(self, url, path, log):
-        try:
-            resp = requests.get(url, stream=True)
-            if resp.status_code == 200:
-                with open(path, 'wb') as f:
-                    for chunk in resp.iter_content(chunk_size=8192):
-                        f.write(chunk)
-                log.write_line(f"  [green]Successfully saved to instance.[/green]")
-            else:
-                log.write_line(f"  [red]Download failed: {resp.status_code}[/red]")
-        except Exception as e:
-            log.write_line(f"  [red]Error: {e}[/red]")
-        # ... rest of the sync logic ...
-        
-        # Copy Configs (Overwrite)
-        log.write_line("Updating configurations from local config/ folder...")
         if os.path.exists(local_config):
             config_count = 0
             for root, dirs, files in os.walk(local_config):
@@ -288,6 +307,22 @@ class SyncScreen(Screen):
         log.write_line("\n[bold green]Success: Sync Complete![/bold green]")
         self.query_one("#btn-sync", Button).label = "Sync Again"
 
+    def download_mod(self, url, path, log) -> bool:
+        try:
+            resp = requests.get(url, stream=True)
+            if resp.status_code == 200:
+                with open(path, 'wb') as f:
+                    for chunk in resp.iter_content(chunk_size=8192):
+                        f.write(chunk)
+                log.write_line(f"  [green]Successfully saved to instance.[/green]")
+                return True
+            else:
+                log.write_line(f"  [red]Download failed: {resp.status_code}[/red]")
+                return False
+        except Exception as e:
+            log.write_line(f"  [red]Error: {e}[/red]")
+            return False
+
 class MCManagerApp(App):
     CSS = """
     #list-container {
@@ -300,10 +335,15 @@ class MCManagerApp(App):
         padding: 1;
         margin-bottom: 1;
     }
-    #sync-log {
+    #mod-table {
         height: 1fr;
         border: double gray;
         margin: 1 0;
+    }
+    #sync-log {
+        height: 8;
+        border: solid gray;
+        margin-bottom: 1;
     }
     #actions {
         height: 3;
