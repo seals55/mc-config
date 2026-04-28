@@ -79,12 +79,12 @@ class InstanceScanner:
         loader = "vanilla"
         if os.path.exists(pack_path):
             try:
-                with open(pack_path, 'r') as f:
+                with open(pack_path, 'r', encoding='utf-8') as f:
                     data = json.load(f)
                     components = data.get("components", [])
                     for comp in components:
-                        uid = comp.get("uid")
-                        version = comp.get("version")
+                        uid = comp.get("uid", "")
+                        version = comp.get("version", "Unknown")
                         if uid == "net.minecraft":
                             mc_version = version
                         elif "fabric-loader" in uid:
@@ -95,7 +95,8 @@ class InstanceScanner:
                             loader = "forge"
                         elif "quilt-loader" in uid:
                             loader = "quilt"
-            except Exception:
+            except Exception as e:
+                print(f"Error parsing mmc-pack.json at {pack_path}: {e}")
                 pass
 
         # Determine minecraft folder
@@ -174,137 +175,143 @@ class SyncScreen(Screen):
         table = self.query_one(DataTable)
         log.write_line("Starting synchronization...")
         
-        repo_root = os.path.dirname(os.path.abspath(__file__))
-        local_config = os.path.join(repo_root, "config")
-        os.makedirs(local_config, exist_ok=True)
+        try:
+            repo_root = os.path.dirname(os.path.abspath(__file__))
+            local_config = os.path.join(repo_root, "config")
+            os.makedirs(local_config, exist_ok=True)
 
-        dst_mods = os.path.join(self.instance.minecraft_path, "mods")
-        dst_config = os.path.join(self.instance.minecraft_path, "config")
-        dst_backups = os.path.join(self.instance.minecraft_path, "backups", "mods")
-        meta_path = os.path.join(self.instance.minecraft_path, "mod_meta.json")
-        
-        os.makedirs(dst_mods, exist_ok=True)
-        os.makedirs(dst_config, exist_ok=True)
-        os.makedirs(dst_backups, exist_ok=True)
-
-        mod_meta = {}
-        if os.path.exists(meta_path):
-            try:
-                with open(meta_path, 'r') as f:
-                    mod_meta = json.load(f)
-            except Exception:
-                mod_meta = {}
-
-        log.write_line("\n[bold]Step 1: Checking Mods & Required Dependencies[/bold]")
-        
-        to_process = list(self.mod_list)
-        processed = set()
-        updated_count = 0
-        installed_count = 0
-
-        while to_process:
-            slug_or_id = to_process.pop(0)
-            if slug_or_id in processed:
-                continue
-            processed.add(slug_or_id)
-
-            # Update status in table if it exists
-            row_key = None
-            for key in table.rows:
-                if table.get_row(key)[0] == slug_or_id:
-                    row_key = key
-                    break
+            dst_mods = os.path.join(self.instance.minecraft_path, "mods")
+            dst_config = os.path.join(self.instance.minecraft_path, "config")
+            dst_backups = os.path.join(self.instance.minecraft_path, "backups", "mods")
+            meta_path = os.path.join(self.instance.minecraft_path, "mod_meta.json")
             
-            if row_key:
-                table.update_cell(row_key, "Status", "[yellow]Checking...[/yellow]")
-            else:
-                # Add row for dependencies
-                row_key = table.add_row(slug_or_id, "N/A", "Pending...", "[yellow]Checking...[/yellow]")
+            os.makedirs(dst_mods, exist_ok=True)
+            os.makedirs(dst_config, exist_ok=True)
+            os.makedirs(dst_backups, exist_ok=True)
 
-            version_data = ModrinthAPI.get_latest_version(slug_or_id, self.instance.mc_version, self.instance.loader)
+            mod_meta = {}
+            if os.path.exists(meta_path):
+                try:
+                    with open(meta_path, 'r') as f:
+                        mod_meta = json.load(f)
+                except Exception:
+                    mod_meta = {}
+
+            log.write_line("\n[bold]Step 1: Checking Mods & Required Dependencies[/bold]")
             
-            if version_data:
-                project_id = version_data['project_id']
-                latest_ver = version_data['version_number']
-                table.update_cell(row_key, "Latest Version", latest_ver)
+            to_process = list(self.mod_list)
+            processed = set()
+            updated_count = 0
+            installed_count = 0
 
-                deps = version_data.get('dependencies', [])
-                for dep in deps:
-                    if dep.get('dependency_type') == 'required':
-                        dep_id = dep.get('project_id')
-                        if dep_id and dep_id not in processed:
-                            to_process.append(dep_id)
+            while to_process:
+                slug_or_id = to_process.pop(0)
+                if slug_or_id in processed:
+                    continue
+                processed.add(slug_or_id)
 
-                file_data = next((f for f in version_data['files'] if f['primary']), version_data['files'][0])
-                filename = file_data['filename']
-                url = file_data['url']
+                # Update status in table if it exists
+                row_key = None
+                for key in table.rows:
+                    if table.get_row(key)[0] == slug_or_id:
+                        row_key = key
+                        break
                 
-                new_mod_path = os.path.join(dst_mods, filename)
-                old_info = mod_meta.get(project_id) # Now a dict: {"file": "...", "version": "..."}
-                
-                if isinstance(old_info, str): # Backward compatibility
-                    old_filename = old_info
-                    old_version = "Unknown"
+                if row_key:
+                    table.update_cell(row_key, "Status", "[yellow]Checking...[/yellow]")
                 else:
-                    old_filename = old_info.get("file") if old_info else None
-                    old_version = old_info.get("version") if old_info else "None"
+                    # Add row for dependencies
+                    row_key = table.add_row(slug_or_id, "N/A", "Pending...", "[yellow]Checking...[/yellow]")
 
-                table.update_cell(row_key, "Current Version", old_version if old_filename else "Not Installed")
+                version_data = ModrinthAPI.get_latest_version(slug_or_id, self.instance.mc_version, self.instance.loader)
+                
+                if version_data:
+                    project_id = version_data['project_id']
+                    latest_ver = version_data['version_number']
+                    table.update_cell(row_key, "Latest Version", latest_ver)
 
-                if old_filename and old_filename != filename:
-                    table.update_cell(row_key, "Status", "[cyan]Update Available[/cyan]")
-                    old_path = os.path.join(dst_mods, old_filename)
-                    if os.path.exists(old_path):
-                        log.write_line(f"Updating {slug_or_id}: Backing up {old_filename}...")
-                        backup_path = os.path.join(dst_backups, f"{old_filename}.bak")
-                        shutil.move(old_path, backup_path)
+                    deps = version_data.get('dependencies', [])
+                    for dep in deps:
+                        if dep.get('dependency_type') == 'required':
+                            dep_id = dep.get('project_id')
+                            if dep_id and dep_id not in processed:
+                                to_process.append(dep_id)
+
+                    file_data = next((f for f in version_data['files'] if f['primary']), version_data['files'][0])
+                    filename = file_data['filename']
+                    url = file_data['url']
                     
-                    log.write_line(f"  -> Downloading {filename}...")
-                    table.update_cell(row_key, "Status", "[blue]Updating...[/blue]")
-                    if self.download_mod(url, new_mod_path, log):
-                        mod_meta[project_id] = {"file": filename, "version": latest_ver}
-                        table.update_cell(row_key, "Status", "[green]Updated[/green]")
-                        table.update_cell(row_key, "Current Version", latest_ver)
-                        updated_count += 1
+                    new_mod_path = os.path.join(dst_mods, filename)
+                    old_info = mod_meta.get(project_id) # Now a dict: {"file": "...", "version": "..."}
+                    
+                    if isinstance(old_info, str): # Backward compatibility
+                        old_filename = old_info
+                        old_version = "Unknown"
                     else:
-                        table.update_cell(row_key, "Status", "[red]Failed[/red]")
-                
-                elif not os.path.exists(new_mod_path):
-                    log.write_line(f"Installing {slug_or_id} -> {filename}...")
-                    table.update_cell(row_key, "Status", "[blue]Installing...[/blue]")
-                    if self.download_mod(url, new_mod_path, log):
-                        mod_meta[project_id] = {"file": filename, "version": latest_ver}
-                        table.update_cell(row_key, "Status", "[green]Installed[/green]")
-                        table.update_cell(row_key, "Current Version", latest_ver)
-                        installed_count += 1
+                        old_filename = old_info.get("file") if old_info else None
+                        old_version = old_info.get("version") if old_info else "None"
+
+                    table.update_cell(row_key, "Current Version", old_version if old_filename else "Not Installed")
+
+                    if old_filename and old_filename != filename:
+                        table.update_cell(row_key, "Status", "[cyan]Update Available[/cyan]")
+                        old_path = os.path.join(dst_mods, old_filename)
+                        if os.path.exists(old_path):
+                            log.write_line(f"Updating {slug_or_id}: Backing up {old_filename}...")
+                            backup_path = os.path.join(dst_backups, f"{old_filename}.bak")
+                            shutil.move(old_path, backup_path)
+                        
+                        log.write_line(f"  -> Downloading {filename}...")
+                        table.update_cell(row_key, "Status", "[blue]Updating...[/blue]")
+                        if self.download_mod(url, new_mod_path, log):
+                            mod_meta[project_id] = {"file": filename, "version": latest_ver}
+                            table.update_cell(row_key, "Status", "[green]Updated[/green]")
+                            table.update_cell(row_key, "Current Version", latest_ver)
+                            updated_count += 1
+                        else:
+                            table.update_cell(row_key, "Status", "[red]Failed[/red]")
+                    
+                    elif not os.path.exists(new_mod_path):
+                        log.write_line(f"Installing {slug_or_id} -> {filename}...")
+                        table.update_cell(row_key, "Status", "[blue]Installing...[/blue]")
+                        if self.download_mod(url, new_mod_path, log):
+                            mod_meta[project_id] = {"file": filename, "version": latest_ver}
+                            table.update_cell(row_key, "Status", "[green]Installed[/green]")
+                            table.update_cell(row_key, "Current Version", latest_ver)
+                            installed_count += 1
+                        else:
+                            table.update_cell(row_key, "Status", "[red]Failed[/red]")
                     else:
-                        table.update_cell(row_key, "Status", "[red]Failed[/red]")
+                        log.write_line(f"Mod {filename} is up to date.")
+                        table.update_cell(row_key, "Status", "[green]Up to date[/green]")
+                        mod_meta[project_id] = {"file": filename, "version": latest_ver}
                 else:
-                    log.write_line(f"Mod {filename} is up to date.")
-                    table.update_cell(row_key, "Status", "[green]Up to date[/green]")
-                    mod_meta[project_id] = {"file": filename, "version": latest_ver}
-            else:
-                log.write_line(f"  [yellow]No compatible version found for {slug_or_id}[/yellow]")
-                table.update_cell(row_key, "Status", "[yellow]No compat ver[/yellow]")
+                    log.write_line(f"  [yellow]No compatible version found for {slug_or_id}[/yellow]")
+                    table.update_cell(row_key, "Status", "[yellow]No compat ver[/yellow]")
 
-        with open(meta_path, 'w') as f:
-            json.dump(mod_meta, f, indent=4)
+            with open(meta_path, 'w') as f:
+                json.dump(mod_meta, f, indent=4)
 
-        log.write_line(f"\nSummary: {installed_count} installed, {updated_count} updated.")
+            log.write_line(f"\nSummary: {installed_count} installed, {updated_count} updated.")
 
-        log.write_line("\n[bold]Step 2: Syncing Configurations[/bold]")
-        if os.path.exists(local_config):
-            config_count = 0
-            for root, dirs, files in os.walk(local_config):
-                rel_path = os.path.relpath(root, local_config)
-                dest_root = os.path.join(dst_config, rel_path)
-                os.makedirs(dest_root, exist_ok=True)
-                for f in files:
-                    shutil.copy2(os.path.join(root, f), os.path.join(dest_root, f))
-                    config_count += 1
-            log.write_line(f"Updated {config_count} configuration files.")
+            log.write_line("\n[bold]Step 2: Syncing Configurations[/bold]")
+            if os.path.exists(local_config):
+                config_count = 0
+                for root, dirs, files in os.walk(local_config):
+                    rel_path = os.path.relpath(root, local_config)
+                    dest_root = os.path.join(dst_config, rel_path)
+                    os.makedirs(dest_root, exist_ok=True)
+                    for f in files:
+                        shutil.copy2(os.path.join(root, f), os.path.join(dest_root, f))
+                        config_count += 1
+                log.write_line(f"Updated {config_count} configuration files.")
 
-        log.write_line("\n[bold green]Success: Sync Complete![/bold green]")
+            log.write_line("\n[bold green]Success: Sync Complete![/bold green]")
+        except Exception as e:
+            log.write_line(f"\n[bold red]FATAL ERROR: {str(e)}[/bold red]")
+            import traceback
+            log.write_line(traceback.format_exc())
+            
         self.query_one("#btn-sync", Button).label = "Sync Again"
 
     def download_mod(self, url, path, log) -> bool:
