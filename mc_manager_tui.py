@@ -97,7 +97,7 @@ class ModScanner:
 
     @staticmethod
     def is_newer(current: str, latest: str) -> bool:
-        if not latest or latest == "Unknown" or latest == "...": return False
+        if not latest or latest == "Unknown": return False
         if current == latest: return False
         def normalize(v: str) -> str:
             v = re.sub(r'\[.*?\]', '', v)
@@ -187,7 +187,7 @@ class SyncManager:
             for mod in local_mods:
                 inst_mod = inst_map.get(mod.mod_id); inst_ver = inst_mod.version if inst_mod else "Missing"
                 sync_s = "[green]Applied[/green]" if inst_mod and not ModScanner.is_newer(inst_ver, mod.version) else ("[cyan]Update Pending[/cyan]" if inst_mod else "[yellow]Not Applied[/yellow]")
-                if self.status_callback: self.status_callback(mod.name, mod.version, inst_ver, "...", "...", sync_s, "")
+                if self.status_callback: self.status_callback(mod.name, mod.version, inst_ver, "Scanning", "Checking updates", sync_s, "")
 
             self.logger("\n[bold]Checking for mod updates...[/bold]")
             for mod in local_mods:
@@ -204,8 +204,7 @@ class SyncManager:
                 if not os.path.exists(dst_path):
                     for item in os.listdir(dst_mods):
                         if mod.mod_id.lower() in item.lower() and item != mod.filename:
-                            self.logger(f"  Backing up old version in instance: {item}")
-                            shutil.move(os.path.join(dst_mods, item), os.path.join(dst_backups, f"{item}.bak"))
+                            self.logger(f"  Backing up {item}"); shutil.move(os.path.join(dst_mods, item), os.path.join(dst_backups, f"{item}.bak"))
                     self.logger(f"  Copying {mod.filename} to instance...")
                     shutil.copy2(mod.path, dst_path)
                     if self.status_callback: self.status_callback(mod.name, mod.version, mod.version, latest_v, status, "[green]Applied[/green]", link)
@@ -306,12 +305,12 @@ if TUI_AVAILABLE:
         
         def tui_logger(self, msg: str):
             log = self.query_one("#sync-log", Log)
+            # Log widget with markup=True handles [bold] strings directly, NOT Text objects
             log.write(msg + "\n")
 
         @work(exclusive=True)
         async def run_sync(self):
-            log, table = self.query_one("#sync-log", Log), self.query_one(DataTable)
-            table.clear(); self.links = {}
+            table = self.query_one(DataTable); table.clear(); self.links = {}
             def status_cb(name, local, instance, latest, status, sync, link):
                 row_key = None
                 for key in table.rows:
@@ -323,8 +322,10 @@ if TUI_AVAILABLE:
                 
                 if not row_key: row_key = table.add_row(name, local, instance, latest, r_status, r_sync)
                 else:
-                    table.update_cell(row_key, self.columns[1], local); table.update_cell(row_key, self.columns[2], instance)
-                    table.update_cell(row_key, self.columns[3], latest); table.update_cell(row_key, self.columns[4], r_status)
+                    table.update_cell(row_key, self.columns[1], local)
+                    table.update_cell(row_key, self.columns[2], instance)
+                    table.update_cell(row_key, self.columns[3], latest)
+                    table.update_cell(row_key, self.columns[4], r_status)
                     table.update_cell(row_key, self.columns[5], r_sync)
                 if link: self.links[name] = link
             
