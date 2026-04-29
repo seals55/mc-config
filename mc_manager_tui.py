@@ -356,10 +356,15 @@ if TUI_AVAILABLE:
 def main():
     parser = argparse.ArgumentParser(description="Minecraft Instance Manager")
     parser.add_argument("instance", nargs="?", help="Instance name for CLI mode")
+    parser.add_argument("--instances-path", help="Path to Prism Launcher instances folder")
     args = parser.parse_args()
+
     appdata = os.environ.get("APPDATA")
-    if not appdata: print("Error: APPDATA environment variable not found."); sys.exit(1)
-    base_path = os.path.join(appdata, "PrismLauncher", "instances")
+    base_path = args.instances_path or (os.path.join(appdata, "PrismLauncher", "instances") if appdata else None)
+    
+    if not base_path:
+        print("Error: Could not determine instances path. Use --instances-path or set APPDATA.")
+        sys.exit(1)
     if args.instance:
         scanner = InstanceScanner(base_path); instances = scanner.scan()
         instance = next((i for i in instances if i.name == args.instance or os.path.basename(i.path) == args.instance), None)
